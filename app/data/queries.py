@@ -16,6 +16,9 @@ def month_tariff(conn: sqlite3.Connection, year: int, month: int) -> dict[str, A
 
 def previous_month_reading(conn: sqlite3.Connection, tenant_id: int, year: int,
                            month: int) -> Decimal | None:
+    # FR-06 / Issue #2: выбираем наиболее свежую ЗАПОЛНЕННУЮ запись
+    # предыдущего календарного месяца. Черновик без end_reading не блокирует
+    # более раннюю запись с конечным показанием. В другие месяцы не заглядываем.
     row = conn.execute("""SELECT end_reading FROM calculations
         WHERE tenant_id = ? AND year = ? AND month = ? AND end_reading IS NOT NULL
         ORDER BY updated_at DESC, id DESC LIMIT 1""", (tenant_id, year, month)).fetchone()
@@ -51,6 +54,56 @@ def later_ids(conn: sqlite3.Connection, tenant_id: int, start: str,
         AND period_start > ? AND (? IS NULL OR id != ?)
         ORDER BY period_start, id""", (tenant_id, start, exclude_id, exclude_id)).fetchall()
     return tuple(row[0] for row in rows)
+
+
+
+def update_tariff_derived_values(conn: sqlite3.Connection, calculation_id: int, *,
+                                 consumption: Decimal | None, amount: Decimal | None,
+                                 is_ready: bool) -> None:
+    """Технический перерасчёт не является пользовательским редактированием.
+
+    Сохраняем updated_at, используемый для выбора последнего расчёта.
+    Типы Decimal приводятся к тексту с той же проверкой, что и в database.py.
+    """
+    from .database import _decimal_text
+
+    cursor = conn.execute("""UPDATE calculations
+        SET consumption = ?, total_amount = ?, manual_amount = 0, is_ready = ?
+        WHERE id = ?""", (_decimal_text(consumption, 3), _decimal_text(amount, 2),
+                         int(is_ready), calculation_id))
+    if cursor.rowcount != 1:
+        raise LookupError(f"Расчёт {calculation_id} не найден.")
+
+
+def list_future_calculations(conn: sqlite3.Connection, tenant_id: int, since: str) -> list[dict[str, Any]]:
+    """Хронологический порядок без изменения отметок пользовательского редактирования."""
+    from .database import _as_dict
+
+    rows = conn.execute("""SELECT * FROM calculations
+        WHERE tenant_id = ? AND period_start > ?
+        ORDER BY period_start, id""", (tenant_id, since)).fetchall()
+    return [_as_dict(row, ("start_reading", "end_reading", "consumption", "total_amount"))
+            for row in rows]
+
+
+def update_inherited_reading(conn: sqlite3.Connection, calculation_id: int, *,
+                             start_reading: Decimal | None, consumption: Decimal | None,
+                             amount: Decimal | None, is_ready: bool) -> None:
+    """Согласовать *автоматически* унаследованное начало, не трогая updated_at.
+
+    manual_consumption и manual_amount сбрасываются по FR-09; вручную
+    заданное начало не передаётся сюда. Если источник исчез, оставляем
+    provenance previous_month для будущей повторной синхронизации.
+    """
+    from .database import _decimal_text
+
+    cursor = conn.execute("""UPDATE calculations SET start_reading = ?, consumption = ?,
+        total_amount = ?, manual_consumption = 0, manual_amount = 0, is_ready = ?
+        WHERE id = ? AND start_reading_source = 'previous_month'""",
+        (_decimal_text(start_reading, 3), _decimal_text(consumption, 3),
+         _decimal_text(amount, 2), int(is_ready), calculation_id))
+    if cursor.rowcount != 1:
+        raise LookupError(f"Автоматический расчёт {calculation_id} не найден.")
 
 
 def invalidate_documents(conn: sqlite3.Connection, calculation_ids: tuple[int, ...] | None = None,
