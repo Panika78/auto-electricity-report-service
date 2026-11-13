@@ -33,7 +33,7 @@ def previous_manual_start(conn: sqlite3.Connection, tenant_id: int, year: int,
 
 def has_earlier_calculation(conn: sqlite3.Connection, tenant_id: int, start: str) -> bool:
     return conn.execute("""SELECT 1 FROM calculations WHERE tenant_id = ?
-        AND period_start < ? LIMIT 1""", (tenant_id, start)).fetchone() is not None
+        AND period_start <= ? LIMIT 1""", (tenant_id, start)).fetchone() is not None
 
 
 def overlapping_ids(conn: sqlite3.Connection, tenant_id: int, year: int, month: int,
