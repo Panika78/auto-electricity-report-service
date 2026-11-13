@@ -10,7 +10,7 @@
 - Функции создания, чтения, просмотра списка и обновления сущностей в `app/data/database.py`.
 - Сохранение базы **вне приложения**, при повторном запуске записи не сбрасываются.
 
-Экран арендаторов, автоматические расчёты, генерация документов и Windows-сборка **ещё не реализованы** и относятся к следующим issues.
+Экран арендаторов, GUI для расчётов, генерация PDF/ZIP и Windows-сборка **ещё не реализованы** и относятся к следующим issues.
 
 ## Установка и запуск (Python 3.11+)
 
@@ -76,3 +76,39 @@ python -m unittest discover -s tests -v
 ```
 
 Тесты SQLite включают сценарий с двумя независимыми Python-процессами, проверки повреждённой схемы и неверных системных путей. GUI-тесты требуют установленного PySide6 и используют `QT_QPA_PLATFORM=offscreen`; без него они помечаются как пропущенные. Для ручной проверки GUI на Windows запустите `python -m app.main`, убедитесь в появлении окна и возможности его закрыть. Проверка Windows 10/11 без Python и сборка PyInstaller — отдельный этап MVP.
+
+
+## Реализовано в issue #2: бизнес-логика
+
+- Независимые от GUI расчёты `Decimal`: до 3 знаков показаний/расхода, 4 у тарифа, 2 у суммы с `ROUND_HALF_UP`, сумма прописью.
+- `CalculationService` в `app/core/service.py`: создание и автосохранение черновиков, начальные показания, пересекающиеся/неполные периоды, ручные корректировки, пересчёт тарифов, проверка готовности и массовый выбор.
+- `ConfirmationRequired` с `code` и `affected_ids` возвращается до записи при пересечении, исправлении истории, ручной корректировке, изменении использованного тарифа, удалении, дублирующемся номере или нулевой выгрузке. После подтверждения вызов повторяется с соответствующим `confirm_*`.
+- Документы: `next_document_number`, `reserve_document`, `prepare_document`, `document_status`. Только **после успешного сохранения PDF** генератор должен вызвать `mark_document_generated(document_id, expected_revision=snapshot["revision"])`; при ошибке записи PDF этот метод не вызывается. Сами PDF в этом issue не формируются.
+- Все операции записи сервиса выполняются в транзакциях `Database.transaction()`; низкоуровневые функции `app.data.database` предназначены для слоя данных. GUI должен использовать именно сервис, иначе можно обойти проверки и отметку актуальности.
+- Автоподстановка ручного начала без конечного показания допускается лишь при включённой настройке и явном `confirm_manual_reuse=True`.
+
+Пример программного интерфейса:
+
+```python
+from decimal import Decimal
+from app.core.service import CalculationService
+from app.data.database import Database
+
+database = Database()
+database.initialize()
+service = CalculationService(database)
+service.set_tariff(2026, 10, Decimal("11.07"))
+draft = service.create_calculation(tenant_id=1, year=2026, month=10,
+                                   start_reading=Decimal("193630"),
+                                   end_reading=Decimal("197030"))
+print(draft["consumption"], draft["total_amount"])  # 3400 37638.00
+```
+
+Расширенные тесты расчётов и метаданных документов находятся в `tests/test_core.py`, запуск вместе с существующими тестами:
+
+```bash
+QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
+python -m compileall -q app tests
+```
+
+Экран ввода, формирование PDF и ZIP не относятся к issue #2.
