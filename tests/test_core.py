@@ -343,6 +343,10 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(updated['updated_at'], november['updated_at'])
         self.assertTrue(updated['is_ready'])
         self.assertEqual(self.service.document_status(november['id'], 'act'), 'needs_update')
+        # Автокоррекция сохраняет updated_at, но должна отклонять PDF,
+        # подготовленный до изменения источника данных.
+        with self.assertRaises(ValueError):
+            self.service.mark_document_generated(doc['id'], expected_revision=prepared['revision'])
         self.assertEqual(CalculationService(Database(self.db.path)).get_calculation(
             november['id'])['start_reading'], D('115'))
 
