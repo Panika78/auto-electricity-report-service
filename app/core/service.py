@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import calendar
+import hashlib
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -61,6 +62,20 @@ class CalculationService:
         if calculation is None:
             raise LookupError(f"Расчёт {calculation_id} не найден.")
         return calculation
+
+    @staticmethod
+    def _calculation_fingerprint(calc: Mapping[str, Any]) -> str:
+        """Обнаруживает технические изменения даже при сохранении updated_at.
+
+        Используется только для проверки подготовленного PDF перед отметкой
+        генерации; статус актуальности по-прежнему хранится в documents.
+        """
+        fields = ("tenant_id", "year", "month", "period_start", "period_end",
+                  "start_reading", "end_reading", "consumption", "total_amount",
+                  "manual_consumption", "manual_amount", "start_reading_source",
+                  "is_ready")
+        payload = repr(tuple(str(calc[field]) for field in fields))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _refresh_auto_starts(self, conn: Any, tenant_id: int, since: str) -> None:
         """Согласовать зависимые previous_month расчёты после подтверждённой правки.
@@ -388,7 +403,9 @@ class CalculationService:
             return {"calculation": calc, "tariff": tariff, "tenant": tenant,
                     "performer": settings, "document": document,
                     "amount_in_words": amount_in_words(calc["total_amount"]),
-                    "revision": {"calculation": calc["updated_at"], "tariff": tariff["updated_at"],
+                    "revision": {"calculation": calc["updated_at"],
+                                 "calculation_values": self._calculation_fingerprint(calc),
+                                 "tariff": tariff["updated_at"],
                                  "tenant": tenant["updated_at"], "performer": settings["updated_at"],
                                  "document": document["updated_at"] if document else None}}
 
@@ -403,6 +420,7 @@ class CalculationService:
             tenant = self._require_tenant(conn, calc["tenant_id"])
             settings = db.get_settings(conn)
             current_revision = {"calculation": calc["updated_at"],
+                                "calculation_values": self._calculation_fingerprint(calc),
                                 "tariff": tariff["updated_at"] if tariff else None,
                                 "tenant": tenant["updated_at"], "performer": settings["updated_at"],
                                 "document": document["updated_at"]}
