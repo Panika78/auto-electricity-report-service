@@ -26,14 +26,31 @@ def decimal_value(value: Decimal | str | int | None, places: int, *,
 
 def calculate_consumption(start: Decimal | str | int, end: Decimal | str | int) -> Decimal:
     """Отрицательный результат допустим как *ошибка черновика*, не для экспорта."""
-    return decimal_value(end, 3) - decimal_value(start, 3)
+    first = decimal_value(start, 3)
+    last = decimal_value(end, 3)
+    # Decimal uses the active context even for subtraction. Preserve every
+    # integer and fractional digit instead of silently rounding large readings.
+    with localcontext() as context:
+        context.prec = max(
+            28,
+            len(first.as_tuple().digits) + len(last.as_tuple().digits) + 2,
+            max(first.adjusted(), last.adjusted()) + 5,
+        )
+        return last - first
 
 
 def calculate_total(consumption: Decimal | str | int, tariff: Decimal | str | int) -> Decimal:
     quantity = decimal_value(consumption, 3)
     rate = decimal_value(tariff, 4)
     with localcontext() as context:
-        context.prec = max(28, len(quantity.as_tuple().digits) + len(rate.as_tuple().digits) + 5)
+        # Scientific notation can represent large integers with very few
+        # coefficient digits (e.g. Decimal("1E+30")). Account for magnitude
+        # as well as coefficient length before rounding to kopecks.
+        context.prec = max(
+            28,
+            len(quantity.as_tuple().digits) + len(rate.as_tuple().digits) + 5,
+            quantity.adjusted() + rate.adjusted() + 5,
+        )
         return (quantity * rate).quantize(KOPECK, rounding=ROUND_HALF_UP)
 
 
@@ -82,7 +99,10 @@ def amount_in_words(amount: Decimal | str | int) -> str:
     """Рубли прописью, копейки двумя цифрами; поддерживаются суммы до 10**18 рублей."""
     number = decimal_value(amount, 2)
     rubles = int(number)
-    kopecks = int((number - rubles) * 100)
+    # Extract kopecks exactly, regardless of the caller's decimal context.
+    with localcontext() as context:
+        context.prec = max(28, len(number.as_tuple().digits) + 3, number.adjusted() + 5)
+        kopecks = int((number - rubles) * 100)
     if rubles >= 1000 ** len(_UNITS):
         raise ValueError("Сумма слишком велика для записи прописью.")
     words: list[str] = []
