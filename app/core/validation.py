@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Mapping, Any
 
-from .calculations import decimal_value, calculate_total
+from .calculations import calculate_consumption, calculate_total, decimal_value
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,7 @@ def validate_calculation(calculation: Mapping[str, Any], tariff: Decimal | None)
             errors.append("Расход отрицательный или некорректный.")
     if (len(readings) == 2 and parsed_consumption is not None
             and not calculation.get("manual_consumption")
-            and parsed_consumption != readings[1] - readings[0]):
+            and parsed_consumption != calculate_consumption(readings[0], readings[1])):
         errors.append("Расход не соответствует показаниям.")
     parsed_tariff: Decimal | None = None
     if tariff is None:
