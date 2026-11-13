@@ -5,6 +5,8 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 
 KOPECK = Decimal("0.01")
+# Максимальная сумма, поддерживаемая amount_in_words: 0 ... 10**18 - 0.01 ₽.
+MAX_AMOUNT_IN_WORDS = Decimal("1000000000000000000")
 
 
 def decimal_value(value: Decimal | str | int | None, places: int, *,
@@ -98,13 +100,13 @@ def _triad(value: int, feminine: bool) -> list[str]:
 def amount_in_words(amount: Decimal | str | int) -> str:
     """Рубли прописью, копейки двумя цифрами; поддерживаются суммы до 10**18 рублей."""
     number = decimal_value(amount, 2)
+    if number >= MAX_AMOUNT_IN_WORDS:
+        raise ValueError("Сумма слишком велика для записи прописью.")
     rubles = int(number)
     # Extract kopecks exactly, regardless of the caller's decimal context.
     with localcontext() as context:
         context.prec = max(28, len(number.as_tuple().digits) + 3, number.adjusted() + 5)
         kopecks = int((number - rubles) * 100)
-    if rubles >= 1000 ** len(_UNITS):
-        raise ValueError("Сумма слишком велика для записи прописью.")
     words: list[str] = []
     remainder = rubles
     groups = []
