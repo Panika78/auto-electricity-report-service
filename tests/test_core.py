@@ -426,5 +426,151 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(by_id[no_calculation]['reason'], 'no_calculation')
 
 
+
+    def test_historical_insert_reconciles_future_readings_and_document(self):
+        self.tariff(rate='1')
+        self.tariff(year=2026, month=11, rate='1')
+        october = self.make(start_reading='100', end_reading='110')
+        november = self.make(2026, 11, end_reading='120')
+        act = self.service.reserve_document(november['id'], 'act')
+        prepared = self.service.prepare_document(november['id'], 'act')
+        self.service.mark_document_generated(act['id'], expected_revision=prepared['revision'])
+        before = self.service.get_calculation(november['id'])
+        with self.assertRaises(ConfirmationRequired) as exc:
+            self.make(start_reading='105', end_reading='115', confirm_overlap=True)
+        self.assertEqual(exc.exception.code, 'historical_readings')
+        self.assertIn(november['id'], exc.exception.affected_ids)
+        self.assertEqual(self.service.suggest_start_reading(self.tenant_id, 2026, 11).value, D('110'))
+        inserted = self.make(start_reading='105', end_reading='115',
+                             confirm_overlap=True, confirm_history=True)
+        self.assertEqual(inserted['end_reading'], D('115'))
+        after = self.service.get_calculation(november['id'])
+        self.assertEqual(after['start_reading'], D('115'))
+        self.assertEqual(after['consumption'], D('5'))
+        self.assertEqual(after['total_amount'], D('5.00'))
+        self.assertEqual(after['updated_at'], before['updated_at'])
+        self.assertEqual(self.service.document_status(november['id'], 'act'), 'needs_update')
+        self.assertEqual(self.service.suggest_start_reading(self.tenant_id, 2026, 11).value, D('115'))
+        with self.assertRaises(ValueError):
+            self.service.mark_document_generated(act['id'], expected_revision=prepared['revision'])
+        self.assertEqual(self.service.get_calculation(october['id'])['end_reading'], D('110'))
+
+    def test_historical_insert_does_not_overwrite_manual_future_start(self):
+        self.tariff(rate='1')
+        self.tariff(year=2026, month=11, rate='1')
+        self.make(start_reading='100', end_reading='110')
+        manual = self.make(2026, 11, start_reading='110', end_reading='120')
+        act = self.service.reserve_document(manual['id'], 'act')
+        snap = self.service.prepare_document(manual['id'], 'act')
+        self.service.mark_document_generated(act['id'], expected_revision=snap['revision'])
+        self.make(start_reading='105', end_reading='115',
+                  confirm_overlap=True, confirm_history=True)
+        unchanged = self.service.get_calculation(manual['id'])
+        self.assertEqual(unchanged['start_reading'], D('110'))
+        self.assertEqual(unchanged['consumption'], D('10'))
+        self.assertEqual(self.service.document_status(manual['id'], 'act'), 'current')
+
+    def test_move_auto_period_back_to_month_with_older_source(self):
+        for y, m in ((2026, 8), (2026, 9), (2026, 10), (2026, 11)):
+            self.tariff(year=y, month=m, rate='1')
+        self.make(2026, 8, start_reading='50', end_reading='80')
+        october = self.make(start_reading='100', end_reading='110')
+        november = self.make(2026, 11, end_reading='120')
+        self.assertEqual(november['start_reading'], D('110'))
+        with self.assertRaises(ConfirmationRequired) as exc:
+            self.service.update_calculation(
+                november['id'], year=2026, month=9,
+                period_start='2026-09-01', period_end='2026-09-30')
+        self.assertEqual(exc.exception.code, 'historical_readings')
+        self.assertEqual(self.service.get_calculation(november['id'])['month'], 11)
+        moved = self.service.update_calculation(
+            november['id'], year=2026, month=9,
+            period_start='2026-09-01', period_end='2026-09-30',
+            confirm_history=True)
+        self.assertEqual((moved['year'], moved['month']), (2026, 9))
+        self.assertEqual(moved['start_reading_source'], 'previous_month')
+        self.assertEqual(moved['start_reading'], D('80'))
+        self.assertEqual(moved['consumption'], D('40'))
+        self.assertEqual(moved['total_amount'], D('40.00'))
+        self.assertTrue(moved['is_ready'])
+        self.assertEqual(self.service.get_calculation(october['id'])['start_reading'], D('100'))
+
+    def test_move_auto_period_back_without_previous_source_becomes_draft(self):
+        self.tariff(rate='1')
+        self.tariff(year=2026, month=9, rate='1')
+        self.tariff(year=2026, month=11, rate='1')
+        self.make(start_reading='100', end_reading='110')
+        november = self.make(2026, 11, end_reading='120')
+        moved = self.service.update_calculation(
+            november['id'], year=2026, month=9,
+            period_start='2026-09-01', period_end='2026-09-30',
+            confirm_history=True)
+        self.assertIsNone(moved['start_reading'])
+        self.assertIsNone(moved['consumption'])
+        self.assertIsNone(moved['total_amount'])
+        self.assertFalse(moved['is_ready'])
+        self.assertEqual(moved['start_reading_source'], 'previous_month')
+        self.assertFalse(self.service.validate(moved['id']).ready)
+
+    def test_move_auto_period_forward_across_year_boundary(self):
+        self.tariff(year=2026, month=11, rate='1')
+        self.tariff(year=2026, month=12, rate='1')
+        self.tariff(year=2027, month=1, rate='1')
+        self.tariff(year=2027, month=2, rate='1')
+        november = self.make(2026, 11, start_reading='100', end_reading='300')
+        self.make(2026, 12, start_reading='200', end_reading='225')
+        self.make(2027, 1, start_reading='225', end_reading='250')
+        moved = self.service.update_calculation(
+            november['id'], year=2027, month=2,
+            period_start='2027-02-01', period_end='2027-02-28',
+            confirm_history=True)
+        # Manual start is not automatically replaced by the January source.
+        self.assertEqual(moved['start_reading'], D('100'))
+        self.assertEqual(moved['start_reading_source'], 'manual')
+        self.assertEqual(moved['consumption'], D('200'))
+        self.assertEqual(moved['total_amount'], D('200.00'))
+
+    def test_move_auto_period_forward_to_new_month_replaces_old_inheritance(self):
+        self.tariff(year=2026, month=11, rate='1')
+        self.tariff(year=2026, month=12, rate='1')
+        self.tariff(year=2027, month=1, rate='1')
+        self.tariff(year=2027, month=2, rate='1')
+        self.make(2026, 11, start_reading='100', end_reading='110')
+        december = self.make(2026, 12, end_reading='300')
+        self.make(2027, 1, start_reading='225', end_reading='250')
+        self.assertEqual(december['start_reading'], D('110'))
+        moved = self.service.update_calculation(
+            december['id'], year=2027, month=2,
+            period_start='2027-02-01', period_end='2027-02-28',
+            confirm_history=True)
+        self.assertEqual((moved['year'], moved['month']), (2027, 2))
+        self.assertEqual(moved['start_reading_source'], 'previous_month')
+        self.assertEqual(moved['start_reading'], D('250'))
+        self.assertEqual(moved['consumption'], D('50'))
+        self.assertEqual(moved['total_amount'], D('50.00'))
+        self.assertTrue(moved['is_ready'])
+
+    def test_document_readiness_matches_amount_in_words_range(self):
+        self.tariff(rate='1')
+        maximum = self.make(start_reading='0', end_reading='999999999999999999.99')
+        self.assertTrue(maximum['is_ready'])
+        self.assertTrue(self.service.validate(maximum['id']).ready)
+        self.assertEqual(maximum['total_amount'], D('999999999999999999.99'))
+        self.assertTrue(self.service.prepare_document(maximum['id'], 'act')['amount_in_words'].endswith(
+            '99 копеек'))
+        too_large = self.make(start_reading='0', end_reading='1000000000000000000',
+                              confirm_overlap=True)
+        self.assertEqual(too_large['total_amount'], D('1000000000000000000.00'))
+        self.assertFalse(too_large['is_ready'])
+        invalid = self.service.validate(too_large['id'])
+        self.assertTrue(any('прописью' in e for e in invalid.errors))
+        with self.assertRaises(ValueError):
+            self.service.prepare_document(too_large['id'], 'act')
+        with self.assertRaises(ValueError):
+            self.service.reserve_document(too_large['id'], 'act')
+        with self.assertRaises(ValueError):
+            amount_in_words(D('1000000000000000000'))
+
+
 if __name__ == '__main__':
     unittest.main()
