@@ -6,7 +6,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Mapping, Any
 
-from .calculations import calculate_consumption, calculate_total, decimal_value
+from .calculations import (MAX_AMOUNT_IN_WORDS, calculate_consumption,
+                           calculate_total, decimal_value)
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,8 @@ def validate_calculation(calculation: Mapping[str, Any], tariff: Decimal | None)
             parsed_amount = decimal_value(amount, 2)
         except (ValueError, TypeError):
             errors.append("Сумма отрицательная или некорректная.")
+    if parsed_amount is not None and parsed_amount >= MAX_AMOUNT_IN_WORDS:
+        errors.append("Сумма превышает поддерживаемый диапазон для записи прописью.")
     if (parsed_consumption is not None and parsed_tariff is not None and parsed_amount is not None
             and not calculation.get("manual_amount")
             and parsed_amount != calculate_total(parsed_consumption, parsed_tariff)):
