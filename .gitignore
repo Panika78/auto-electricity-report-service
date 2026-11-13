@@ -218,3 +218,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SQLite user databases, journals and backups (never commit personal data)
+*.db
+*.db-*
+*.db.bak
+*.db.backup
+*.sqlite
+*.sqlite-*
+*.sqlite.bak
+*.sqlite.backup
+*.sqlite3
+*.sqlite3-*
+*.sqlite3.bak
+*.sqlite3.backup

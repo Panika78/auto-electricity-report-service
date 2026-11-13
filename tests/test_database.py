@@ -2,6 +2,8 @@
 
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from decimal import Decimal
@@ -12,6 +14,7 @@ from app.data import database as db_module
 from app.data.database import (
     SCHEMA_VERSION,
     Database,
+    SchemaIntegrityError,
     UnsupportedSchemaVersion,
     create_calculation,
     create_document,
@@ -101,6 +104,22 @@ class DatabaseTests(unittest.TestCase):
         with self.db.connection() as conn:
             self.assertEqual(len(list_tenants(conn)), 1)
             self.assertEqual(get_tenant(conn, -1), None)
+
+    def test_blank_or_invisible_tenant_names_rejected_on_create_and_update(self):
+        invalid_names = ("", "   ", "\t", "\n", "\t\n", "\u00a0", "\u2003", "\u200b", "\u2060", "\u0301")
+        tenant_id = self.add_tenant("Тестовая компания")
+        for invalid in invalid_names:
+            with self.subTest(name=repr(invalid)):
+                with self.assertRaises(ValueError):
+                    with self.db.transaction() as conn:
+                        create_tenant(conn, name=invalid)
+                with self.assertRaises(ValueError):
+                    with self.db.transaction() as conn:
+                        update_tenant(conn, tenant_id, name=invalid)
+        with self.db.transaction() as conn:
+            update_tenant(conn, tenant_id, name="  Компания А  ")
+        with self.db.connection() as conn:
+            self.assertEqual([tenant["name"] for tenant in list_tenants(conn)], ["  Компания А  "])
 
     def test_tariff_create_read_update_and_list(self):
         with self.db.transaction() as conn:
@@ -309,6 +328,77 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(get_tenant(conn, tenant_id)["id"], tenant_id)
             self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
 
+    def test_declared_current_schema_without_tables_is_rejected_without_reset(self):
+        path = Path(self.directory.name) / "empty_with_version.db"
+        with sqlite3.connect(path) as conn:
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        before = path.read_bytes()
+        with self.assertRaisesRegex(SchemaIntegrityError, "отсутствуют обязательные таблицы"):
+            Database(path).initialize()
+        self.assertEqual(path.read_bytes(), before)
+        with sqlite3.connect(path) as conn:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+
+    def test_missing_column_in_current_schema_fails_without_data_loss(self):
+        tenant_id = self.add_tenant("Уцелевшая организация")
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("ALTER TABLE tenants DROP COLUMN postal_address")
+        with self.assertRaisesRegex(SchemaIntegrityError, "postal_address"):
+            self.db.initialize()
+        with sqlite3.connect(self.path) as conn:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+            self.assertEqual(conn.execute("SELECT name FROM tenants WHERE id = ?", (tenant_id,)).fetchone()[0],
+                             "Уцелевшая организация")
+
+    def test_foreign_key_check_rejects_invalid_existing_data_without_deletion(self):
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("""INSERT INTO calculations(
+                tenant_id, year, month, period_start, period_end, created_at, updated_at
+            ) VALUES (999, 2026, 10, '2026-10-01', '2026-10-31', 'test', 'test')""")
+        with self.assertRaisesRegex(SchemaIntegrityError, "внешние ключи"):
+            self.db.initialize()
+        with sqlite3.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM calculations WHERE tenant_id = 999").fetchone()[0], 1)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+
+    def test_data_persists_between_independent_python_processes(self):
+        # Оба запуска происходят вне процесса unittest и из другого cwd.
+        env = os.environ.copy()
+        root = str(Path(__file__).resolve().parents[1])
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, (root, env.get("PYTHONPATH"))))
+        writer = """import sys
+from app.data.database import Database, create_tenant, create_tariff
+from decimal import Decimal
+db = Database(sys.argv[1]); db.initialize()
+with db.transaction() as conn:
+    tenant = create_tenant(conn, name='Процесс A', inn='0000000000', initial_reading=Decimal('3.125'))
+    tariff = create_tariff(conn, year=2026, month=10, rate=Decimal('4.1234'))
+print(f'{tenant},{tariff}')
+"""
+        reader = """import sys
+from decimal import Decimal
+from app.data.database import Database, get_tenant, get_tariff
+db = Database(sys.argv[1]); db.initialize()
+with db.connection() as conn:
+    tenant = get_tenant(conn, int(sys.argv[2]))
+    tariff = get_tariff(conn, int(sys.argv[3]))
+    assert tenant['name'] == 'Процесс A' and tenant['inn'] == '0000000000'
+    assert tenant['initial_reading'] == Decimal('3.125')
+    assert tariff['rate'] == Decimal('4.1234')
+print('OK')
+"""
+        created = subprocess.run(
+            [sys.executable, "-c", writer, str(self.path)],
+            cwd=self.directory.name, env=env, capture_output=True, text=True, check=True,
+        )
+        tenant_id, tariff_id = created.stdout.strip().split(",")
+        reopened = subprocess.run(
+            [sys.executable, "-c", reader, str(self.path), tenant_id, tariff_id],
+            cwd=self.directory.name, env=env, capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(reopened.stdout.strip(), "OK")
+
     def test_unknown_newer_schema_version_is_never_overwritten(self):
         tenant_id = self.add_tenant()
         with sqlite3.connect(self.path) as conn:
@@ -390,6 +480,21 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(default_db.path.parent.name, "ElectricityReports")
         with default_db.connection() as conn:
             self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 1)
+
+    def test_relative_windows_localappdata_is_rejected_without_creating_database(self):
+        with mock.patch.object(db_module.sys, "platform", "win32"), mock.patch.dict(
+            os.environ, {"LOCALAPPDATA": "."}
+        ):
+            with self.assertRaisesRegex(RuntimeError, "абсолютным путём"):
+                Database().initialize()
+        self.assertFalse((Path.cwd() / "ElectricityReports" / "app.db").exists())
+
+    def test_relative_xdg_directory_is_rejected(self):
+        with mock.patch.object(db_module.sys, "platform", "linux"), mock.patch.dict(
+            os.environ, {"XDG_DATA_HOME": "relative/path"}
+        ):
+            with self.assertRaisesRegex(RuntimeError, "абсолютным путём"):
+                get_database_path()
 
     def test_windows_path_uses_localappdata_and_not_working_directory(self):
         fake_user_dir = Path(self.directory.name) / "UserData" / "Local"

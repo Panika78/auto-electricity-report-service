@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import unicodedata
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -23,17 +24,34 @@ class UnsupportedSchemaVersion(RuntimeError):
     """База была создана более новой версией приложения."""
 
 
+class SchemaIntegrityError(RuntimeError):
+    """Версия БД известна, но структура или данные повреждены."""
+
+
 def get_database_path() -> Path:
     """Путь к пользовательской БД, независимый от exe и текущего каталога."""
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA")
         if not base:
             raise RuntimeError("Не определён системный каталог LOCALAPPDATA.")
-        return Path(base) / "ElectricityReports" / "app.db"
+        data_root = Path(base).expanduser()
+    else:
+        base = os.environ.get("XDG_DATA_HOME")
+        data_root = Path(base).expanduser() if base else Path.home() / ".local" / "share"
 
-    base = os.environ.get("XDG_DATA_HOME")
-    data_root = Path(base) if base else Path.home() / ".local" / "share"
-    return data_root / "ElectricityReports" / "app.db"
+    if not data_root.is_absolute():
+        raise RuntimeError("Системный каталог пользовательских данных должен быть абсолютным путём.")
+    return data_root.resolve() / "ElectricityReports" / "app.db"
+
+
+def _require_tenant_name(name: str) -> str:
+    # strip() отсеивает Unicode-пробелы; категория Unicode также исключает
+    # невидимые format-символы и отдельные комбинируемые знаки.
+    if not isinstance(name, str) or not name.strip() or not any(
+        unicodedata.category(char)[0] in "LNPS" for char in name
+    ):
+        raise ValueError("Название арендатора не может быть пустым или невидимым.")
+    return name
 
 
 def _timestamp() -> str:
@@ -191,6 +209,54 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
 
 MIGRATIONS = (_migrate_to_v1,)
 
+# Проверяем существующие БД без попыток "починить" пользовательские данные.
+# Полные наборы колонок v1 позволяют обнаружить также частичную схему.
+_REQUIRED_COLUMNS = {
+    "tenants": set("""id name inn kpp ogrn legal_address postal_address bank_name bik
+        account_number correspondent_account contract_number contract_date
+        additional_agreement initial_reading initial_reading_date is_archived
+        created_at updated_at""".split()),
+    "tariffs": set("id year month rate created_at updated_at".split()),
+    "calculations": set("""id tenant_id year month period_start period_end
+        start_reading end_reading consumption total_amount manual_consumption
+        manual_amount start_reading_source is_ready created_at updated_at""".split()),
+    "documents": set("""id calculation_id type number document_date is_current
+        last_generated_at created_at updated_at""".split()),
+    "settings": set("""id performer_name inn kpp ogrn address bank_name bik
+        account_number correspondent_account signature_path stamp_path
+        reuse_manual_start_readings created_at updated_at""".split()),
+}
+
+
+def _validate_schema(conn: sqlite3.Connection) -> None:
+    """Отказать в запуске при неполной или повреждённой БД, ничего не исправляя."""
+    try:
+        result = conn.execute("PRAGMA quick_check").fetchone()
+        if result is None or result[0] != "ok":
+            raise SchemaIntegrityError("Проверка целостности SQLite не пройдена.")
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        missing_tables = _REQUIRED_COLUMNS.keys() - tables
+        if missing_tables:
+            raise SchemaIntegrityError(
+                "В базе отсутствуют обязательные таблицы: " + ", ".join(sorted(missing_tables))
+            )
+        for table, required in _REQUIRED_COLUMNS.items():
+            present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            missing = required - present
+            if missing:
+                raise SchemaIntegrityError(
+                    f"В таблице {table} отсутствуют поля: {', '.join(sorted(missing))}"
+                )
+        if conn.execute("SELECT 1 FROM settings WHERE id = 1").fetchone() is None:
+            raise SchemaIntegrityError("В базе отсутствует запись настроек исполнителя.")
+        violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+        if violation is not None:
+            raise SchemaIntegrityError("Нарушены внешние ключи пользовательской базы.")
+    except sqlite3.DatabaseError as exc:
+        raise SchemaIntegrityError("Ошибка проверки целостности пользовательской базы.") from exc
+
 
 class Database:
     """Фабрика короткоживущих SQLite-соединений с явными транзакциями."""
@@ -231,6 +297,7 @@ class Database:
             for migration_version in range(version + 1, SCHEMA_VERSION + 1):
                 MIGRATIONS[migration_version - 1](conn)
                 conn.execute(f"PRAGMA user_version = {migration_version}")
+            _validate_schema(conn)
 
 
 _TENANT_COLUMNS = frozenset({
@@ -277,6 +344,7 @@ def create_tenant(
     additional_agreement: str = "", initial_reading: Decimal | str | int | None = None,
     initial_reading_date: date | str | None = None, is_archived: bool = False,
 ) -> int:
+    name = _require_tenant_name(name)
     now = _timestamp()
     cursor = conn.execute(
         """INSERT INTO tenants(
@@ -303,6 +371,8 @@ def list_tenants(conn: sqlite3.Connection, *, include_archived: bool = False) ->
 
 
 def update_tenant(conn: sqlite3.Connection, tenant_id: int, **changes: Any) -> None:
+    if "name" in changes:
+        changes["name"] = _require_tenant_name(changes["name"])
     if "initial_reading" in changes:
         changes["initial_reading"] = _decimal_text(changes["initial_reading"], 3)
     for field in ("initial_reading_date", "contract_date"):
