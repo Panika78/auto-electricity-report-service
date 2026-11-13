@@ -77,31 +77,40 @@ class CalculationService:
         payload = repr(tuple(str(calc[field]) for field in fields))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _refresh_auto_starts(self, conn: Any, tenant_id: int, since: str) -> None:
-        """Согласовать зависимые previous_month расчёты после подтверждённой правки.
+    def _refresh_inherited_calculation(self, conn: Any, calc: Mapping[str, Any], *,
+                                      force: bool = False) -> None:
+        """Синхронизирует одно автоматическое начало с календарным месяцем записи.
 
-        Ручные начала и расчёты с другими источниками не меняются. Технический
-        пересчёт не перемещает запись в сортировке updated_at DESC, id DESC.
-        Каждая затронутая запись и её документы обновляются в транзакции вызова.
+        При переносе периода force=True сбрасывает ручные overrides даже при
+        совпавшем числовом показании: источник теперь другой месяц.
+        """
+        if calc["start_reading_source"] != "previous_month":
+            return
+        previous = self._previous_month(calc["year"], calc["month"])
+        inherited = queries.previous_month_reading(
+            conn, calc["tenant_id"], *previous) if previous else None
+        if not force and inherited == calc["start_reading"]:
+            return
+        tariff = queries.month_tariff(conn, calc["year"], calc["month"])
+        consumption, amount = recalculate(
+            inherited, calc["end_reading"], tariff["rate"] if tariff else None)
+        values = {**calc, "start_reading": inherited, "consumption": consumption,
+                  "total_amount": amount, "manual_consumption": False, "manual_amount": False}
+        values["is_ready"] = validate_calculation(
+            values, tariff["rate"] if tariff else None).ready
+        queries.update_inherited_reading(
+            conn, calc["id"], start_reading=inherited, consumption=consumption,
+            amount=amount, is_ready=values["is_ready"])
+        queries.invalidate_documents(conn, (calc["id"],))
+
+    def _refresh_auto_starts(self, conn: Any, tenant_id: int, since: str) -> None:
+        """Синхронизирует зависимые месяцы в той же транзакции, сохраняя порядок правок.
+
+        Не перезаписывает ручные начальные показания и не меняет updated_at
+        технически пересчитанных записей.
         """
         for calc in queries.list_future_calculations(conn, tenant_id, since):
-            if calc["start_reading_source"] != "previous_month":
-                continue
-            previous = self._previous_month(calc["year"], calc["month"])
-            inherited = queries.previous_month_reading(conn, tenant_id, *previous) if previous else None
-            if inherited == calc["start_reading"]:
-                continue
-            tariff = queries.month_tariff(conn, calc["year"], calc["month"])
-            consumption, amount = recalculate(
-                inherited, calc["end_reading"], tariff["rate"] if tariff else None)
-            values = {**calc, "start_reading": inherited, "consumption": consumption,
-                      "total_amount": amount, "manual_consumption": False, "manual_amount": False}
-            values["is_ready"] = validate_calculation(
-                values, tariff["rate"] if tariff else None).ready
-            queries.update_inherited_reading(
-                conn, calc["id"], start_reading=inherited, consumption=consumption,
-                amount=amount, is_ready=values["is_ready"])
-            queries.invalidate_documents(conn, (calc["id"],))
+            self._refresh_inherited_calculation(conn, calc)
 
     def _suggest_start(self, conn: Any, tenant_id: int, year: int, month: int,
                        period_start: str) -> StartReadingProposal:
@@ -144,7 +153,8 @@ class CalculationService:
                            start_reading: Decimal | str | int | None = None,
                            end_reading: Decimal | str | int | None = None,
                            confirm_overlap: bool = False,
-                           confirm_manual_reuse: bool = False) -> dict[str, Any]:
+                           confirm_manual_reuse: bool = False,
+                           confirm_history: bool = False) -> dict[str, Any]:
         default_start, default_end = self._month(year, month)
         start, end = db._require_period(year, month, period_start or default_start,
                                         period_end or default_end)
@@ -169,7 +179,15 @@ class CalculationService:
                           end_reading=finish, consumption=consumption, total_amount=amount,
                           start_reading_source=source)
             values["is_ready"] = validate_calculation(values, tariff["rate"] if tariff else None).ready
+            # Добавление завершённого источника задним числом может изменить
+            # автоподстановку у уже существующих последующих расчётов.
+            dependents = (queries.later_ids(conn, tenant_id, start)
+                          if finish is not None else ())
+            if dependents and not confirm_history:
+                raise ConfirmationRequired("historical_readings", dependents)
             calc_id = db.create_calculation(conn, **values)
+            if dependents:
+                self._refresh_auto_starts(conn, tenant_id, start)
             return db.get_calculation(conn, calc_id)
 
     def get_calculation(self, calculation_id: int) -> dict[str, Any]:
@@ -211,6 +229,8 @@ class CalculationService:
                                   for key in ("start_reading", "end_reading"))
             period_changed = any(key in changes and values[key] != current[key]
                                  for key in ("year", "month", "period_start", "period_end"))
+            month_changed = ((values["year"], values["month"]) !=
+                             (current["year"], current["month"]))
             consumption_changed = "consumption" in changes and values["consumption"] != current["consumption"]
             amount_changed = "total_amount" in changes and values["total_amount"] != current["total_amount"]
             if reading_changed and "consumption" in changes or (reading_changed or consumption_changed or period_changed) and "total_amount" in changes:
@@ -234,6 +254,12 @@ class CalculationService:
                 values["manual_amount"] = False
             if period_changed:
                 values["manual_amount"] = False
+            if month_changed and "start_reading" in changes:
+                # Даже когда явное значение численно совпало с прежним,
+                # пользователь указал новое ручное начало перенесённого периода.
+                values["start_reading_source"] = (
+                    "manual" if values["start_reading"] is not None else "unspecified")
+                values["manual_consumption"] = False
             if amount_changed:
                 values["manual_amount"] = True
             tariff = queries.month_tariff(conn, values["year"], values["month"])
@@ -248,6 +274,12 @@ class CalculationService:
             if updates:
                 db.update_calculation(conn, calculation_id, **updates)
                 queries.invalidate_documents(conn, (calculation_id,))
+                if month_changed:
+                    # Сначала обновить само унаследованное начало после
+                    # переноса: оно может иметь period_start == history_start,
+                    # поэтому не попадёт в выборку последующих расчётов.
+                    moved = self._require_calculation(conn, calculation_id)
+                    self._refresh_inherited_calculation(conn, moved, force=True)
                 if reading_changed or period_changed:
                     self._refresh_auto_starts(
                         conn, current["tenant_id"],
