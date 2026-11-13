@@ -246,9 +246,12 @@ class CalculationService:
             if reading_changed:
                 values["manual_consumption"] = False
                 values["manual_amount"] = False
-                if "start_reading" in changes:
-                    values["start_reading_source"] = ("manual" if values["start_reading"] is not None
-                                                      else "unspecified")
+            if "start_reading" in changes:
+                # Явный ввод = ручное начало, даже если число не отличается
+                # от ранее подставленного. Иначе последующее исправление
+                # истории незаметно перезапишет выбор пользователя.
+                values["start_reading_source"] = (
+                    "manual" if values["start_reading"] is not None else "unspecified")
             if consumption_changed:
                 values["manual_consumption"] = True
                 values["manual_amount"] = False
