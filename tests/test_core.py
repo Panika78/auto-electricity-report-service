@@ -217,5 +217,53 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.service.document_status(c['id'], 'act'), 'needs_update')
 
 
+    def test_explicit_zero_tariff_is_not_missing(self):
+        self.tariff(rate='0')
+        c = self.make(start_reading='1', end_reading='2')
+        self.assertTrue(c['is_ready'])
+        self.assertEqual(c['total_amount'], D('0.00'))
+        self.assertFalse(self.service.validate(c['id']).zero_consumption)
+        self.service.reserve_document(c['id'], 'invoice', document_date='2026-12-01')
+
+    def test_manual_numbers_duplicate_after_confirmation_and_year_reset(self):
+        self.tariff()
+        a = self.make(start_reading='1', end_reading='2')
+        b = self.make(start_reading='3', end_reading='4', confirm_overlap=True)
+        doc = self.service.reserve_document(a['id'], 'act', document_date='2027-01-01', number=19)
+        self.assertEqual(self.service.next_document_number('act', '2027-12-31'), 20)
+        with self.assertRaises(ConfirmationRequired) as ex:
+            self.service.reserve_document(b['id'], 'act', document_date='2027-01-03', number=19)
+        self.assertEqual(ex.exception.code, 'duplicate_document_number')
+        duplicate = self.service.reserve_document(b['id'], 'act', document_date='2027-01-03',
+                                                  number=19, confirm_duplicate=True)
+        self.assertEqual(self.service.document_number_duplicates('act', 19, '2027-01-01',
+                                                                  exclude_id=duplicate['id']), (doc['id'],))
+        self.assertEqual(self.service.reserve_document(b['id'], 'act')['number'], 19)
+        self.assertEqual(self.service.next_document_number('act', '2028-01-01'), 1)
+
+    def test_bulk_uses_previous_ready_when_latest_draft_and_skips_latest_ready_zero(self):
+        self.tariff()
+        first = self.make(start_reading='0', end_reading='3')
+        self.make(start_reading='4', confirm_overlap=True)
+        selected = self.service.bulk_candidates(2026, 10)['selected']
+        self.assertEqual([c['id'] for c in selected], [first['id']])
+        zero = self.make(start_reading='5', end_reading='5', confirm_overlap=True)
+        result = self.service.bulk_candidates(2026, 10)
+        self.assertEqual(result['selected'], [])
+        self.assertEqual(result['skipped'][0]['calculation_id'], zero['id'])
+
+    def test_invalid_edit_rolls_back_and_manual_amount_cannot_be_negative(self):
+        self.tariff()
+        c = self.make(start_reading='10', end_reading='20')
+        with self.assertRaises(ValueError):
+            self.service.update_calculation(c['id'], end_reading=-1)
+        with self.assertRaises(ValueError):
+            self.service.update_calculation(c['id'], total_amount='-5', confirm_manual=True)
+        with self.assertRaises(ValueError):
+            self.service.update_calculation(c['id'], end_reading='20.0001')
+        unchanged = self.service.get_calculation(c['id'])
+        self.assertEqual(unchanged['end_reading'], D('20'))
+        self.assertEqual(unchanged['total_amount'], D('110.70'))
+
 if __name__ == '__main__':
     unittest.main()
