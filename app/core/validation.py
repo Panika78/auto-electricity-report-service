@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Mapping, Any
 
-from .calculations import decimal_value
+from .calculations import decimal_value, calculate_total
 
 
 @dataclass(frozen=True)
@@ -46,33 +46,44 @@ def validate_calculation(calculation: Mapping[str, Any], tariff: Decimal | None)
     if len(readings) == 2 and readings[1] < readings[0]:
         errors.append("Конечное показание меньше начального.")
     consumption = calculation.get("consumption")
+    parsed_consumption: Decimal | None = None
     if consumption is None:
         errors.append("Расход не рассчитан.")
     else:
         try:
-            decimal_value(consumption, 3)
+            parsed_consumption = decimal_value(consumption, 3)
         except (ValueError, TypeError):
             errors.append("Расход отрицательный или некорректный.")
+    if (len(readings) == 2 and parsed_consumption is not None
+            and not calculation.get("manual_consumption")
+            and parsed_consumption != readings[1] - readings[0]):
+        errors.append("Расход не соответствует показаниям.")
+    parsed_tariff: Decimal | None = None
     if tariff is None:
         errors.append("Тариф за месяц не установлен.")
     else:
         try:
-            decimal_value(tariff, 4)
+            parsed_tariff = decimal_value(tariff, 4)
         except (ValueError, TypeError):
             errors.append("Тариф некорректен.")
     amount = calculation.get("total_amount")
+    parsed_amount: Decimal | None = None
     if amount is None:
         errors.append("Сумма не рассчитана.")
     else:
         try:
-            decimal_value(amount, 2)
+            parsed_amount = decimal_value(amount, 2)
         except (ValueError, TypeError):
             errors.append("Сумма отрицательная или некорректная.")
+    if (parsed_consumption is not None and parsed_tariff is not None and parsed_amount is not None
+            and not calculation.get("manual_amount")
+            and parsed_amount != calculate_total(parsed_consumption, parsed_tariff)):
+        errors.append("Сумма не соответствует расходу и тарифу.")
     if calculation.get("manual_consumption"):
         warnings.append("Расход изменён вручную.")
     if calculation.get("manual_amount"):
         warnings.append("Сумма изменена вручную.")
-    zero = consumption is not None and Decimal(str(consumption)) == 0 if not isinstance(consumption, float) else False
+    zero = parsed_consumption == 0 if parsed_consumption is not None else False
     if zero:
         warnings.append("Нулевой расход: индивидуальная выгрузка требует подтверждения, массовая пропускает.")
     return ValidationResult(not errors, tuple(errors), tuple(warnings), zero)
