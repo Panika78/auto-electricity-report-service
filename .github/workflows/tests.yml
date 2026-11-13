@@ -28,6 +28,11 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+      - name: Install Qt platform system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
       - name: Install project with GUI dependency
         run: python -m pip install -e .
       - name: Run all unit and integration tests, including GUI
