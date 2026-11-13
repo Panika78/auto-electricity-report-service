@@ -62,6 +62,32 @@ class CalculationService:
             raise LookupError(f"Расчёт {calculation_id} не найден.")
         return calculation
 
+    def _refresh_auto_starts(self, conn: Any, tenant_id: int, since: str) -> None:
+        """Согласовать зависимые previous_month расчёты после подтверждённой правки.
+
+        Ручные начала и расчёты с другими источниками не меняются. Технический
+        пересчёт не перемещает запись в сортировке updated_at DESC, id DESC.
+        Каждая затронутая запись и её документы обновляются в транзакции вызова.
+        """
+        for calc in queries.list_future_calculations(conn, tenant_id, since):
+            if calc["start_reading_source"] != "previous_month":
+                continue
+            previous = self._previous_month(calc["year"], calc["month"])
+            inherited = queries.previous_month_reading(conn, tenant_id, *previous) if previous else None
+            if inherited == calc["start_reading"]:
+                continue
+            tariff = queries.month_tariff(conn, calc["year"], calc["month"])
+            consumption, amount = recalculate(
+                inherited, calc["end_reading"], tariff["rate"] if tariff else None)
+            values = {**calc, "start_reading": inherited, "consumption": consumption,
+                      "total_amount": amount, "manual_consumption": False, "manual_amount": False}
+            values["is_ready"] = validate_calculation(
+                values, tariff["rate"] if tariff else None).ready
+            queries.update_inherited_reading(
+                conn, calc["id"], start_reading=inherited, consumption=consumption,
+                amount=amount, is_ready=values["is_ready"])
+            queries.invalidate_documents(conn, (calc["id"],))
+
     def _suggest_start(self, conn: Any, tenant_id: int, year: int, month: int,
                        period_start: str) -> StartReadingProposal:
         tenant = self._require_tenant(conn, tenant_id)
@@ -177,7 +203,8 @@ class CalculationService:
             if (consumption_changed or amount_changed) and not confirm_manual:
                 raise ConfirmationRequired("manual_override")
             if reading_changed or period_changed:
-                dependents = queries.later_ids(conn, current["tenant_id"], current["period_start"],
+                history_start = min(current["period_start"], values["period_start"])
+                dependents = queries.later_ids(conn, current["tenant_id"], history_start,
                                                exclude_id=calculation_id)
                 if dependents and not confirm_history:
                     raise ConfirmationRequired("historical_readings", dependents)
@@ -206,6 +233,10 @@ class CalculationService:
             if updates:
                 db.update_calculation(conn, calculation_id, **updates)
                 queries.invalidate_documents(conn, (calculation_id,))
+                if reading_changed or period_changed:
+                    self._refresh_auto_starts(
+                        conn, current["tenant_id"],
+                        min(current["period_start"], values["period_start"]))
             return db.get_calculation(conn, calculation_id)
 
     def set_tariff(self, year: int, month: int, rate: Decimal | str | int, *,
@@ -232,12 +263,25 @@ class CalculationService:
                 values = {**calc, "consumption": consumption, "total_amount": amount,
                           "manual_amount": False}
                 values["is_ready"] = validate_calculation(values, new_rate).ready
-                db.update_calculation(conn, calc["id"], consumption=consumption, total_amount=amount,
-                                      manual_amount=False, is_ready=values["is_ready"])
+                queries.update_tariff_derived_values(
+                    conn, calc["id"], consumption=consumption, amount=amount,
+                    is_ready=values["is_ready"])
             queries.invalidate_documents(conn, ids)
             return queries.month_tariff(conn, year, month)
 
+    def create_tenant(self, *, name: str, **details: Any) -> dict[str, Any]:
+        """Создать карточку с теми же проверками начальных показаний, что и при правке."""
+        if "initial_reading" in details:
+            details["initial_reading"] = decimal_value(
+                details["initial_reading"], 3, allow_none=True)
+        with self.database.transaction() as conn:
+            tenant_id = db.create_tenant(conn, name=name, **details)
+            return db.get_tenant(conn, tenant_id)
+
     def update_tenant(self, tenant_id: int, **changes: Any) -> dict[str, Any]:
+        if "initial_reading" in changes:
+            changes["initial_reading"] = decimal_value(
+                changes["initial_reading"], 3, allow_none=True)
         with self.database.transaction() as conn:
             current = self._require_tenant(conn, tenant_id)
             if not changes:
@@ -270,6 +314,7 @@ class CalculationService:
             if dependents and not confirm_history:
                 raise ConfirmationRequired("historical_readings", dependents)
             db.delete_calculation(conn, calculation_id)
+            self._refresh_auto_starts(conn, calc["tenant_id"], calc["period_start"])
 
     def next_document_number(self, kind: str, document_date: date | str) -> int:
         require_document_type(kind)
@@ -378,8 +423,22 @@ class CalculationService:
                 calculations = db.list_calculations(conn, tenant_id=tenant["id"], year=year, month=month)
                 latest = next((c for c in calculations if validate_calculation(
                     c, tariff["rate"] if tariff else None).ready), None)
-                if latest is None:
-                    skipped.append({"tenant_id": tenant["id"], "reason": "no_ready_calculation"})
+                if not calculations:
+                    skipped.append({"tenant_id": tenant["id"], "reason": "no_calculation",
+                                    "errors": ("Расчёты за выбранный месяц отсутствуют.",)})
+                elif latest is None:
+                    newest = calculations[0]
+                    result = validate_calculation(newest, tariff["rate"] if tariff else None)
+                    if tariff is None:
+                        reason = "missing_tariff"
+                    elif newest["start_reading"] is None or newest["end_reading"] is None:
+                        reason = "incomplete_readings"
+                    elif newest["end_reading"] < newest["start_reading"]:
+                        reason = "invalid_readings"
+                    else:
+                        reason = "not_ready"
+                    skipped.append({"tenant_id": tenant["id"], "reason": reason,
+                                    "calculation_id": newest["id"], "errors": result.errors})
                 elif latest["consumption"] == 0:
                     skipped.append({"tenant_id": tenant["id"], "reason": "zero_consumption",
                                     "calculation_id": latest["id"]})
