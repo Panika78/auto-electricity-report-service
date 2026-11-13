@@ -39,6 +39,12 @@ class DecimalTests(unittest.TestCase):
                 calculate_total(D('0.005'), D('1')),
                 D('0.01'),
             )
+            self.assertEqual(
+                amount_in_words(D('123456789012345.67')),
+                'Сто двадцать три триллиона четыреста пятьдесят шесть миллиардов '
+                'семьсот восемьдесят девять миллионов двенадцать тысяч '
+                'триста сорок пять рублей 67 копеек',
+            )
 
     def test_rejects_float_negative_and_non_finite(self):
         for bad in (0.5, True, D('NaN'), D('Infinity'), D('-Infinity'), '-1', '1.0001'):
