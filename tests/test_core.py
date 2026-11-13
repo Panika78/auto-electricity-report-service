@@ -21,6 +21,31 @@ class DecimalTests(unittest.TestCase):
         self.assertEqual(calculate_total(D('0.5'), D('0.01')), D('0.01'))
         self.assertEqual(calculate_total(D('1.001'), D('1.0005')), D('1.00'))
 
+    def test_large_values_and_low_global_decimal_precision(self):
+        from decimal import localcontext
+
+        with localcontext() as context:
+            context.prec = 6
+            self.assertEqual(
+                calculate_consumption(D('1000000000000000000000000000000.125'),
+                                      D('1000000000000000000000000000001.126')),
+                D('1.001'),
+            )
+            self.assertEqual(
+                calculate_total(D('1E+30'), D('0.0001')),
+                D('100000000000000000000000000.00'),
+            )
+            self.assertEqual(
+                calculate_total(D('0.005'), D('1')),
+                D('0.01'),
+            )
+            self.assertEqual(
+                amount_in_words(D('123456789012345.67')),
+                'Сто двадцать три триллиона четыреста пятьдесят шесть миллиардов '
+                'семьсот восемьдесят девять миллионов двенадцать тысяч '
+                'триста сорок пять рублей 67 копеек',
+            )
+
     def test_rejects_float_negative_and_non_finite(self):
         for bad in (0.5, True, D('NaN'), D('Infinity'), D('-Infinity'), '-1', '1.0001'):
             with self.subTest(bad=bad), self.assertRaises((TypeError, ValueError)):
