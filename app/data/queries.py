@@ -16,7 +16,7 @@ def month_tariff(conn: sqlite3.Connection, year: int, month: int) -> dict[str, A
 
 def previous_month_reading(conn: sqlite3.Connection, tenant_id: int, year: int,
                            month: int) -> Decimal | None:
-    # FR-06 / Issue #2: выбираем наиболее свежую ЗАПОЛНЕННУЮ запись
+    # FR-06/FR-07 (уточнённая политика PRD): выбираем наиболее свежую ЗАПОЛНЕННУЮ запись
     # предыдущего календарного месяца. Черновик без end_reading не блокирует
     # более раннюю запись с конечным показанием. В другие месяцы не заглядываем.
     row = conn.execute("""SELECT end_reading FROM calculations
