@@ -330,6 +330,9 @@ class ServiceTests(unittest.TestCase):
         doc = self.service.reserve_document(november['id'], 'act')
         prepared = self.service.prepare_document(november['id'], 'act')
         self.service.mark_document_generated(doc['id'], expected_revision=prepared['revision'])
+        # Создаём свежий снимок уже после успешной отметки генерации:
+        # document.updated_at не изменится от последующей инвалидации.
+        prepared = self.service.prepare_document(november['id'], 'act')
         self.assertEqual(self.service.document_status(november['id'], 'act'), 'current')
         with self.assertRaises(ConfirmationRequired) as exc:
             self.service.update_calculation(october['id'], end_reading='115')
