@@ -191,7 +191,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(ex.exception.code, 'historical_readings')
         self.assertIn(later['id'], ex.exception.affected_ids)
         self.service.update_calculation(c['id'], end_reading='21', confirm_history=True)
-        self.assertEqual(self.service.get_calculation(later['id'])['start_reading'], D('20'))
+        self.assertEqual(self.service.get_calculation(later['id'])['start_reading'], D('21'))
 
     def test_document_sequences_status_revisions_duplicate_and_deletion(self):
         self.tariff()
@@ -289,6 +289,135 @@ class ServiceTests(unittest.TestCase):
         unchanged = self.service.get_calculation(c['id'])
         self.assertEqual(unchanged['end_reading'], D('20'))
         self.assertEqual(unchanged['total_amount'], D('110.70'))
+
+
+    def test_tariff_recalculation_keeps_user_edit_order_for_autofill_and_bulk(self):
+        self.tariff(rate='1')
+        first = self.make(start_reading='100', end_reading='110')
+        second = self.make(start_reading='200', end_reading='220', confirm_overlap=True)
+        original_times = {c['id']: c['updated_at'] for c in (first, second)}
+        self.assertEqual(self.service.suggest_start_reading(self.tenant_id, 2026, 11).value, D('220'))
+        self.assertEqual(self.service.bulk_candidates(2026, 10)['selected'][0]['id'], second['id'])
+        with self.assertRaises(ConfirmationRequired):
+            self.tariff(rate='2')
+        self.tariff(rate='2', confirm_recalculation=True)
+        for calc in (first, second):
+            updated = self.service.get_calculation(calc['id'])
+            self.assertEqual(updated['updated_at'], original_times[calc['id']])
+        self.assertEqual(self.service.suggest_start_reading(self.tenant_id, 2026, 11).value, D('220'))
+        self.assertEqual(self.service.bulk_candidates(2026, 10)['selected'][0]['id'], second['id'])
+        self.assertEqual(self.make(2026, 11)['start_reading'], D('220'))
+
+    def test_validation_uses_exact_decimal_arithmetic_under_low_precision(self):
+        from decimal import localcontext
+        self.tariff(rate='1')
+        with localcontext() as ctx:
+            ctx.prec = 6
+            calc = self.make(start_reading='0.125', end_reading='1234567.126')
+            self.assertEqual(calc['consumption'], D('1234567.001'))
+            self.assertEqual(calc['total_amount'], D('1234567.00'))
+            result = self.service.validate(calc['id'])
+            self.assertTrue(result.ready, result.errors)
+            self.assertTrue(result.can_export())
+            self.service.reserve_document(calc['id'], 'act', document_date='2026-11-01')
+
+    def test_history_edit_recalculates_automatic_start_and_invalidates_document(self):
+        self.tariff(rate='1')
+        self.tariff(year=2026, month=11, rate='1')
+        october = self.make(start_reading='100', end_reading='110')
+        november = self.make(2026, 11, end_reading='120')
+        self.assertEqual(november['start_reading_source'], 'previous_month')
+        doc = self.service.reserve_document(november['id'], 'act')
+        prepared = self.service.prepare_document(november['id'], 'act')
+        self.service.mark_document_generated(doc['id'], expected_revision=prepared['revision'])
+        self.assertEqual(self.service.document_status(november['id'], 'act'), 'current')
+        with self.assertRaises(ConfirmationRequired) as exc:
+            self.service.update_calculation(october['id'], end_reading='115')
+        self.assertEqual(exc.exception.affected_ids, (november['id'],))
+        self.assertEqual(self.service.get_calculation(october['id'])['end_reading'], D('110'))
+        self.service.update_calculation(october['id'], end_reading='115', confirm_history=True)
+        updated = self.service.get_calculation(november['id'])
+        self.assertEqual(updated['start_reading'], D('115'))
+        self.assertEqual(updated['consumption'], D('5'))
+        self.assertEqual(updated['total_amount'], D('5.00'))
+        self.assertEqual(updated['updated_at'], november['updated_at'])
+        self.assertTrue(updated['is_ready'])
+        self.assertEqual(self.service.document_status(november['id'], 'act'), 'needs_update')
+        self.assertEqual(CalculationService(Database(self.db.path)).get_calculation(
+            november['id'])['start_reading'], D('115'))
+
+    def test_history_edit_does_not_replace_manual_start(self):
+        self.tariff(rate='1')
+        self.tariff(year=2026, month=11, rate='1')
+        october = self.make(start_reading='100', end_reading='110')
+        november = self.make(2026, 11, start_reading='110', end_reading='125')
+        self.assertEqual(november['start_reading_source'], 'manual')
+        doc = self.service.reserve_document(november['id'], 'act')
+        prepared = self.service.prepare_document(november['id'], 'act')
+        self.service.mark_document_generated(doc['id'], expected_revision=prepared['revision'])
+        self.service.update_calculation(october['id'], end_reading='115', confirm_history=True)
+        updated = self.service.get_calculation(november['id'])
+        self.assertEqual(updated['start_reading'], D('110'))
+        self.assertEqual(updated['total_amount'], D('15.00'))
+        self.assertEqual(self.service.document_status(november['id'], 'act'), 'current')
+
+    def test_deleting_historical_source_clears_auto_start_not_manual(self):
+        self.tariff(rate='1')
+        self.tariff(year=2026, month=11, rate='1')
+        october = self.make(start_reading='100', end_reading='110')
+        auto = self.make(2026, 11, end_reading='120')
+        manual = self.make(2026, 11, start_reading='110', end_reading='120',
+                           confirm_overlap=True)
+        self.service.delete_calculation(october['id'], confirm_delete=True, confirm_history=True)
+        updated = self.service.get_calculation(auto['id'])
+        self.assertIsNone(updated['start_reading'])
+        self.assertEqual(updated['start_reading_source'], 'previous_month')
+        self.assertIsNone(updated['consumption'])
+        self.assertFalse(updated['is_ready'])
+        self.assertEqual(self.service.get_calculation(manual['id'])['start_reading'], D('110'))
+
+    def test_tenant_initial_reading_validation_keeps_original_on_error(self):
+        self.service.update_tenant(self.tenant_id, initial_reading='5.125',
+                                   initial_reading_date='2026-10-01')
+        original = self.service.create_calculation(self.tenant_id, 2026, 10)
+        self.assertEqual(original['start_reading'], D('5.125'))
+        with self.assertRaises(ValueError):
+            self.service.update_tenant(self.tenant_id, initial_reading='-10')
+        with self.assertRaises(ValueError):
+            self.service.update_tenant(self.tenant_id, initial_reading='NaN')
+        with self.assertRaises((ValueError, TypeError)):
+            self.service.update_tenant(self.tenant_id, initial_reading=0.1)
+        with self.db.connection() as conn:
+            from app.data.database import get_tenant
+            self.assertEqual(get_tenant(conn, self.tenant_id)['initial_reading'], D('5.125'))
+        self.service.update_tenant(self.tenant_id, initial_reading='0')
+        with self.db.connection() as conn:
+            from app.data.database import get_tenant
+            self.assertEqual(get_tenant(conn, self.tenant_id)['initial_reading'], D('0'))
+        with self.assertRaises(ValueError):
+            self.service.create_tenant(name='Тест', initial_reading='-1')
+        self.assertEqual(self.service.create_tenant(name='Тест', initial_reading='0.125')['initial_reading'],
+                         D('0.125'))
+
+    def test_bulk_skip_reasons_distinguish_missing_record_tariff_and_readings(self):
+        with self.db.transaction() as conn:
+            no_calculation = create_tenant(conn, name='Нет расчётов')
+            incomplete = create_tenant(conn, name='Неполные показания')
+        no_tariff = self.make(start_reading='10', end_reading='20')
+        result = self.service.bulk_candidates(2026, 10)
+        by_id = {entry['tenant_id']: entry for entry in result['skipped']}
+        self.assertEqual(by_id[no_calculation]['reason'], 'no_calculation')
+        self.assertEqual(by_id[self.tenant_id]['reason'], 'missing_tariff')
+        self.assertIn('Тариф', ' '.join(by_id[self.tenant_id]['errors']))
+        self.assertEqual(by_id[self.tenant_id]['calculation_id'], no_tariff['id'])
+        self.tariff(rate='1')
+        self.service.create_calculation(incomplete, 2026, 10, start_reading='10')
+        result = self.service.bulk_candidates(2026, 10)
+        by_id = {entry['tenant_id']: entry for entry in result['skipped']}
+        self.assertEqual(by_id[incomplete]['reason'], 'incomplete_readings')
+        self.assertTrue(any('Конечное' in e for e in by_id[incomplete]['errors']))
+        self.assertEqual(by_id[no_calculation]['reason'], 'no_calculation')
+
 
 if __name__ == '__main__':
     unittest.main()
