@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from decimal import Decimal
+from contextlib import closing, contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -38,6 +39,17 @@ from app.data.database import (
     update_tariff,
     update_tenant,
 )
+
+
+@contextmanager
+def closed_sqlite_connection(path):
+    """sqlite3.Connection as context manager commits, but does not close the file.
+
+    Windows keeps SQLite database files locked until connections are closed.
+    """
+    with closing(sqlite3.connect(path)) as conn:
+        with conn:
+            yield conn
 
 
 class DatabaseTests(unittest.TestCase):
@@ -331,35 +343,35 @@ class DatabaseTests(unittest.TestCase):
 
     def test_declared_current_schema_without_tables_is_rejected_without_reset(self):
         path = Path(self.directory.name) / "empty_with_version.db"
-        with sqlite3.connect(path) as conn:
+        with closed_sqlite_connection(path) as conn:
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         before = path.read_bytes()
         with self.assertRaisesRegex(SchemaIntegrityError, "отсутствуют обязательные таблицы"):
             Database(path).initialize()
         self.assertEqual(path.read_bytes(), before)
-        with sqlite3.connect(path) as conn:
+        with closed_sqlite_connection(path) as conn:
             self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
 
     def test_missing_column_in_current_schema_fails_without_data_loss(self):
         tenant_id = self.add_tenant("Уцелевшая организация")
-        with sqlite3.connect(self.path) as conn:
+        with closed_sqlite_connection(self.path) as conn:
             conn.execute("ALTER TABLE tenants DROP COLUMN postal_address")
         with self.assertRaisesRegex(SchemaIntegrityError, "postal_address"):
             self.db.initialize()
-        with sqlite3.connect(self.path) as conn:
+        with closed_sqlite_connection(self.path) as conn:
             self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
             self.assertEqual(conn.execute("SELECT name FROM tenants WHERE id = ?", (tenant_id,)).fetchone()[0],
                              "Уцелевшая организация")
 
     def test_foreign_key_check_rejects_invalid_existing_data_without_deletion(self):
-        with sqlite3.connect(self.path) as conn:
+        with closed_sqlite_connection(self.path) as conn:
             conn.execute("PRAGMA foreign_keys = OFF")
             conn.execute("""INSERT INTO calculations(
                 tenant_id, year, month, period_start, period_end, created_at, updated_at
             ) VALUES (999, 2026, 10, '2026-10-01', '2026-10-31', 'test', 'test')""")
         with self.assertRaisesRegex(SchemaIntegrityError, "внешние ключи"):
             self.db.initialize()
-        with sqlite3.connect(self.path) as conn:
+        with closed_sqlite_connection(self.path) as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM calculations WHERE tenant_id = 999").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
 
@@ -393,7 +405,7 @@ class DatabaseTests(unittest.TestCase):
             with self.subTest(table=table, mutation=old, replacement=new, extra=extra_sql):
                 path = Path(self.directory.name) / f"broken_constraints_{case_no}.db"
                 shutil.copy2(self.path, path)
-                with sqlite3.connect(path) as conn:
+                with closed_sqlite_connection(path) as conn:
                     conn.execute("PRAGMA foreign_keys = OFF")
                     original_sql = conn.execute(
                         "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
@@ -415,7 +427,7 @@ class DatabaseTests(unittest.TestCase):
                     Database(path).initialize()
                 self.assertIn(error, str(caught.exception))
                 self.assertEqual(path.read_bytes(), before)
-                with sqlite3.connect(path) as conn:
+                with closed_sqlite_connection(path) as conn:
                     self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
                     self.assertEqual(conn.execute("SELECT name FROM tenants WHERE id=?", (tenant_id,)).fetchone()[0],
                                      "Тестовые данные сохраняются")
@@ -463,7 +475,7 @@ print('OK')
 
     def test_unknown_newer_schema_version_is_never_overwritten(self):
         tenant_id = self.add_tenant()
-        with sqlite3.connect(self.path) as conn:
+        with closed_sqlite_connection(self.path) as conn:
             conn.execute("PRAGMA user_version = 999")
         with self.assertRaises(UnsupportedSchemaVersion):
             self.db.initialize()
@@ -527,7 +539,7 @@ print('OK')
         with mock.patch.object(db_module, "get_database_path", side_effect=AssertionError("Путь не должен вызываться")):
             test_db = Database(self.path)
             test_db.initialize()
-        self.assertEqual(test_db.path, self.path)
+        self.assertEqual(test_db.path, self.path.resolve())
 
     def test_first_windows_launch_creates_user_directory_outside_project(self):
         localappdata = Path(self.directory.name) / "FakeUser" / "AppData" / "Local"
@@ -537,7 +549,7 @@ print('OK')
             default_db = Database()
             self.assertFalse(default_db.path.exists())
             default_db.initialize()
-            self.assertEqual(default_db.path, localappdata / "ElectricityReports" / "app.db")
+            self.assertEqual(default_db.path, localappdata.resolve() / "ElectricityReports" / "app.db")
             self.assertTrue(default_db.path.is_file())
             self.assertEqual(default_db.path.parent.name, "ElectricityReports")
         with default_db.connection() as conn:
@@ -563,8 +575,8 @@ print('OK')
         with mock.patch.object(db_module.sys, "platform", "win32"), mock.patch.dict(
             os.environ, {"LOCALAPPDATA": str(fake_user_dir)}
         ):
-            self.assertEqual(get_database_path(), fake_user_dir / "ElectricityReports" / "app.db")
-            self.assertEqual(Database().path, fake_user_dir / "ElectricityReports" / "app.db")
+            self.assertEqual(get_database_path(), fake_user_dir.resolve() / "ElectricityReports" / "app.db")
+            self.assertEqual(Database().path, fake_user_dir.resolve() / "ElectricityReports" / "app.db")
         with mock.patch.object(db_module.sys, "platform", "win32"), mock.patch.dict(
             os.environ, {"LOCALAPPDATA": ""}
         ):
