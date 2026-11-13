@@ -572,5 +572,21 @@ class ServiceTests(unittest.TestCase):
             amount_in_words(D('1000000000000000000'))
 
 
+    def test_explicit_manual_start_equal_to_autofill_is_not_overwritten(self):
+        self.tariff(rate='1')
+        self.tariff(year=2026, month=11, rate='1')
+        oct_calc = self.make(start_reading='100', end_reading='110')
+        november = self.make(2026, 11, end_reading='120')
+        self.assertEqual(november['start_reading_source'], 'previous_month')
+        overridden = self.service.update_calculation(november['id'], start_reading='110')
+        self.assertEqual(overridden['start_reading_source'], 'manual')
+        self.assertEqual(overridden['start_reading'], D('110'))
+        self.service.update_calculation(oct_calc['id'], end_reading='115', confirm_history=True)
+        retained = self.service.get_calculation(november['id'])
+        self.assertEqual(retained['start_reading_source'], 'manual')
+        self.assertEqual(retained['start_reading'], D('110'))
+        self.assertEqual(retained['total_amount'], D('10.00'))
+
+
 if __name__ == '__main__':
     unittest.main()
