@@ -228,6 +228,54 @@ _REQUIRED_COLUMNS = {
 }
 
 
+# Явно проверяем наличие ограничений, а не только существующие нарушения.
+_REQUIRED_UNIQUE = {
+    "tariffs": ("year", "month"),
+    "documents": ("calculation_id", "type"),
+}
+_REQUIRED_FOREIGN_KEYS = {
+    "calculations": ("tenant_id", "tenants", "id", "RESTRICT"),
+    "documents": ("calculation_id", "calculations", "id", "CASCADE"),
+}
+
+
+def _validate_required_constraints(conn: sqlite3.Connection) -> None:
+    for table, columns in _REQUIRED_UNIQUE.items():
+        found = False
+        for index in conn.execute(f"PRAGMA index_list({table})"):
+            # index_list: seq, name, unique, origin, partial
+            if not index[2] or index[4]:
+                continue
+            quoted_name = index[1].replace('"', '""')
+            indexed_columns = tuple(
+                item[2] for item in conn.execute(f'PRAGMA index_info("{quoted_name}")')
+            )
+            if indexed_columns == columns:
+                found = True
+                break
+        if not found:
+            raise SchemaIntegrityError(
+                f"В таблице {table} отсутствует ограничение UNIQUE({', '.join(columns)})."
+            )
+
+    for table, (column, target, target_id, on_delete) in _REQUIRED_FOREIGN_KEYS.items():
+        # У составного FK несколько строк с одинаковым id, он не подходит.
+        fk_groups: dict[int, list[sqlite3.Row]] = {}
+        for fk in conn.execute(f"PRAGMA foreign_key_list({table})"):
+            fk_groups.setdefault(fk[0], []).append(fk)
+        valid = any(
+            len(rows) == 1 and rows[0][1] == 0
+            and rows[0][2] == target and rows[0][3] == column
+            and rows[0][4] == target_id and rows[0][6] == on_delete
+            for rows in fk_groups.values()
+        )
+        if not valid:
+            raise SchemaIntegrityError(
+                f"В таблице {table} отсутствует внешний ключ {column} -> "
+                f"{target}({target_id}) с ON DELETE {on_delete}."
+            )
+
+
 def _validate_schema(conn: sqlite3.Connection) -> None:
     """Отказать в запуске при неполной или повреждённой БД, ничего не исправляя."""
     try:
@@ -249,6 +297,7 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
                 raise SchemaIntegrityError(
                     f"В таблице {table} отсутствуют поля: {', '.join(sorted(missing))}"
                 )
+        _validate_required_constraints(conn)
         if conn.execute("SELECT 1 FROM settings WHERE id = 1").fetchone() is None:
             raise SchemaIntegrityError("В базе отсутствует запись настроек исполнителя.")
         violation = conn.execute("PRAGMA foreign_key_check").fetchone()

@@ -1,6 +1,7 @@
 """Поведенческие проверки SQLite без обращения к пользовательской базе."""
 
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -361,6 +362,67 @@ class DatabaseTests(unittest.TestCase):
         with sqlite3.connect(self.path) as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM calculations WHERE tenant_id = 999").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+
+    def test_existing_schema_missing_required_constraints_is_rejected(self):
+        tenant_id = self.add_tenant("Тестовые данные сохраняются")
+        calculation_id = self.add_calculation(tenant_id)
+        with self.db.transaction() as conn:
+            tariff_id = create_tariff(conn, year=2026, month=10, rate="4.1234")
+            document_id = create_document(
+                conn, calculation_id=calculation_id, type="act",
+                number=7, document_date="2026-10-31",
+            )
+
+        # Для каждой мутации — независимая копия корректной БД.
+        # Восстанавливаем все колонки и существующие данные, но убираем одно
+        # обязательное ограничение: quick_check и foreign_key_check остаются OK.
+        cases = (
+            ("tariffs", ",\n        UNIQUE (year, month)", "", "UNIQUE(year, month)", None),
+            ("documents", ",\n        UNIQUE (calculation_id, type)", "", "UNIQUE(calculation_id, type)", None),
+            ("calculations", " REFERENCES tenants(id) ON DELETE RESTRICT", "", "внешний ключ", None),
+            ("documents", " REFERENCES calculations(id) ON DELETE CASCADE", "", "внешний ключ", None),
+            ("documents", "ON DELETE CASCADE", "ON DELETE RESTRICT", "ON DELETE CASCADE", None),
+            ("tariffs", ",\n        UNIQUE (year, month)", "", "UNIQUE(year, month)",
+             "CREATE UNIQUE INDEX wrong_partial ON tariffs(year, month) WHERE month = 10"),
+            ("tariffs", ",\n        UNIQUE (year, month)", "", "UNIQUE(year, month)",
+             "CREATE UNIQUE INDEX wrong_extra_column ON tariffs(year, month, rate)"),
+            ("documents", "REFERENCES calculations(id)", "REFERENCES settings(id)",
+             "внешний ключ", None),
+        )
+        for case_no, (table, old, new, error, extra_sql) in enumerate(cases):
+            with self.subTest(table=table, mutation=old, replacement=new, extra=extra_sql):
+                path = Path(self.directory.name) / f"broken_constraints_{case_no}.db"
+                shutil.copy2(self.path, path)
+                with sqlite3.connect(path) as conn:
+                    conn.execute("PRAGMA foreign_keys = OFF")
+                    original_sql = conn.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                    ).fetchone()[0]
+                    self.assertIn(old, original_sql)
+                    # Copy-before-drop avoids rewriting unrelated FK declarations.
+                    conn.execute(f"CREATE TEMP TABLE source_data AS SELECT * FROM {table}")
+                    conn.execute(f"DROP TABLE {table}")
+                    conn.execute(original_sql.replace(old, new))
+                    conn.execute(f"INSERT INTO {table} SELECT * FROM source_data")
+                    conn.execute("DROP TABLE source_data")
+                    if extra_sql:
+                        conn.execute(extra_sql)
+                    self.assertEqual(conn.execute("PRAGMA quick_check").fetchone()[0], "ok")
+                    self.assertIsNone(conn.execute("PRAGMA foreign_key_check").fetchone())
+                    self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+                before = path.read_bytes()
+                with self.assertRaises(SchemaIntegrityError) as caught:
+                    Database(path).initialize()
+                self.assertIn(error, str(caught.exception))
+                self.assertEqual(path.read_bytes(), before)
+                with sqlite3.connect(path) as conn:
+                    self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+                    self.assertEqual(conn.execute("SELECT name FROM tenants WHERE id=?", (tenant_id,)).fetchone()[0],
+                                     "Тестовые данные сохраняются")
+                    self.assertEqual(conn.execute("SELECT rate FROM tariffs WHERE id=?", (tariff_id,)).fetchone()[0],
+                                     "4.1234")
+                    self.assertEqual(conn.execute("SELECT number FROM documents WHERE id=?", (document_id,)).fetchone()[0],
+                                     7)
 
     def test_data_persists_between_independent_python_processes(self):
         # Оба запуска происходят вне процесса unittest и из другого cwd.
