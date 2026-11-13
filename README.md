@@ -91,17 +91,22 @@ python -m unittest discover -s tests -v
 
 ```python
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from app.core.service import CalculationService
-from app.data.database import Database
+from app.data.database import Database, create_tenant
 
-database = Database()
-database.initialize()
-service = CalculationService(database)
-service.set_tariff(2026, 10, Decimal("11.07"))
-draft = service.create_calculation(tenant_id=1, year=2026, month=10,
-                                   start_reading=Decimal("193630"),
-                                   end_reading=Decimal("197030"))
-print(draft["consumption"], draft["total_amount"])  # 3400 37638.00
+with TemporaryDirectory() as directory:
+    database = Database(Path(directory) / "demo.db")
+    database.initialize()
+    with database.transaction() as conn:
+        tenant_id = create_tenant(conn, name="Демонстрационный арендатор")
+    service = CalculationService(database)
+    service.set_tariff(2026, 10, Decimal("11.07"))
+    draft = service.create_calculation(tenant_id=tenant_id, year=2026, month=10,
+                                       start_reading=Decimal("193630"),
+                                       end_reading=Decimal("197030"))
+    print(draft["consumption"], draft["total_amount"])  # 3400 37638.00
 ```
 
 Расширенные тесты расчётов и метаданных документов находятся в `tests/test_core.py`, запуск вместе с существующими тестами:
