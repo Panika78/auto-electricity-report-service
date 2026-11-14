@@ -123,19 +123,13 @@ def import_image(source: str, kind: str) -> Path:
         raise ValueError("Выберите изображение PNG или JPEG.")
     from PySide6.QtGui import QImageReader
     reader = QImageReader(str(path))
-    if not reader.canRead() or not reader.read().isNull():
-        # canRead alone does not guarantee a complete image; validate decode below.
-        pass
-    if not reader.canRead():
+    if not reader.canRead() or reader.read().isNull():
         raise ValueError("Изображение повреждено или не поддерживается.")
     directory = image_directory()
     fd, tmp = tempfile.mkstemp(prefix=".upload-", dir=directory)
     os.close(fd)
-    target = directory / (kind + path.suffix.lower())
     try:
         shutil.copyfile(path, tmp)
-        if not QImageReader(str(tmp)).canRead():
-            raise ValueError("Изображение не удалось прочитать.")
         # Preserve the old image when updating settings fails: each upload has its own name.
         import uuid
         target = directory / (kind + "-" + uuid.uuid4().hex + path.suffix.lower())
@@ -144,3 +138,17 @@ def import_image(source: str, kind: str) -> Path:
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def remove_managed_image(path: str | None) -> None:
+    """Remove only image copies located in our own application directory."""
+    if not path:
+        return
+    target = Path(path)
+    if target.is_symlink():
+        raise OSError("Ссылка на файл не удалена из соображений безопасности.")
+    base = image_directory().resolve()
+    if target.resolve().parent != base:
+        return  # old externally referenced file belongs to the user
+    if target.name.startswith(("signature-", "stamp-")):
+        target.unlink(missing_ok=True)
