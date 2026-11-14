@@ -145,7 +145,6 @@ class TenantDialog(QDialog):
         outer.addLayout(actions)
 
         self._load()
-        apply_appearance()
         self.history.setEnabled(self.tenant_id is not None)
         self.archive_button.setVisible(self.tenant_id is not None)
         self.create_button.setVisible(self.tenant_id is None)
@@ -386,7 +385,6 @@ class CalculationDialog(QDialog):
         bottom.addWidget(self._button("Готово", self.accept))
         outer.addLayout(bottom)
         self._refresh()
-        apply_appearance()
 
     @staticmethod
     def _button(label, callback):
@@ -664,7 +662,6 @@ class SettingsPage(QWidget):
         self.note.setStyleSheet("color:#657276;")
         outer.addWidget(self.note)
         self.reload()
-        apply_appearance()
 
     def reload(self) -> None:
         with self.service.database.connection() as conn:
