@@ -295,5 +295,42 @@ class NativeWorkflowTests(unittest.TestCase):
             self.assertIsNone(db.get_settings(conn)["signature_path"])
         self.assertFalse(Path(path).exists())
 
+    def test_editing_one_field_preserves_other_unsaved_input(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import CalculationDialog
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="50", end_reading="70")
+        dialog = CalculationDialog(self.service, self.database, calculation_id=calc["id"])
+        dialog.start_edit.setText("wrong")
+        dialog._mark_pending("start_reading")
+        dialog.end_edit.setText("80")
+        dialog._mark_pending("end_reading")
+        dialog._save_reading("end_reading")
+        self.assertEqual(dialog.start_edit.text(), "wrong")
+        self.assertIn("start_reading", dialog.pending)
+        self.assertEqual(str(self.service.get_calculation(calc["id"])["end_reading"]), "80")
+        with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            dialog.reject()
+        self.assertEqual(str(self.service.get_calculation(calc["id"])["start_reading"]), "50")
+
+    def test_settings_reload_preserves_unsaved_text_after_failure(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import SettingsPage
+        from app.data import database as db
+        page = SettingsPage(self.service)
+        field = page.fields["bank_name"]
+        field.setText("Not persisted")
+        page.pending.add("bank_name")
+        with mock.patch.object(self.service, "update_settings", side_effect=sqlite3.OperationalError("readonly")), \
+             mock.patch.object(QMessageBox, "critical"):
+            page._save_field("bank_name")
+        page.reload()
+        self.assertEqual(field.text(), "Not persisted")
+        self.assertIn("bank_name", page.pending)
+        with self.database.connection() as conn:
+            self.assertEqual(db.get_settings(conn)["bank_name"], "")
+
 if __name__ == "__main__":
     unittest.main()
