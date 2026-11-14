@@ -120,6 +120,7 @@ class NativeWorkflowTests(unittest.TestCase):
         from app.ui.forms import ExportDialog
         from app.data import database as db
         tenant = self._tenant()
+        self.service.update_settings(performer_name="ООО Исполнитель")
         self.service.set_tariff(2026, 10, "5")
         calc = self.service.create_calculation(
             tenant["id"], 2026, 10, start_reading="50", end_reading="50")
@@ -222,6 +223,7 @@ class NativeWorkflowTests(unittest.TestCase):
         from app.ui.forms import ExportDialog
         from app.data import database as db
         tenant = self._tenant()
+        self.service.update_settings(performer_name="ООО Исполнитель")
         self.service.set_tariff(2026, 10, "5")
         calc = self.service.create_calculation(
             tenant["id"], 2026, 10, start_reading="50", end_reading="70")
@@ -243,6 +245,7 @@ class NativeWorkflowTests(unittest.TestCase):
         from app.ui.forms import ExportDialog
         from app.data import database as db
         tenant = self._tenant()
+        self.service.update_settings(performer_name="ООО Исполнитель")
         self.service.set_tariff(2026, 10, "5")
         calc = self.service.create_calculation(
             tenant["id"], 2026, 10, start_reading="50", end_reading="70")
