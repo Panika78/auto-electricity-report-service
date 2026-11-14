@@ -460,7 +460,7 @@ def export_document(service: CalculationService, calculation_id: int, kind: str,
         if recovery_error is not None:
             message += " Безопасное восстановление не завершено; проверьте сохранённые файлы."
             if backup is not None:
-                message += " Резервная копия сохранена для ручного восстановления."
+                message += " Сохранена резервная копия для ручного восстановления."
         if additional:
             message += " Остались файлы, требующие ручной очистки."
         backup_path = backup if backup is not None else (previous.backup_path if previous else None)
