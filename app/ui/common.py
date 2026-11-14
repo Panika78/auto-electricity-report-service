@@ -61,6 +61,11 @@ def guard_database_errors(title: str = "Ошибка доступа к базе 
             try:
                 return slot(self, *args, **kwargs)
             except (sqlite3.Error, OSError) as error:
+                # A constructor cannot safely continue with an unpopulated,
+                # editable card. Let its owner report the error and abort open.
+                # Already-open dialogs retain the normal friendly error UI.
+                if getattr(self, "_initial_load", False):
+                    raise
                 if getattr(self, "note", None) is not None:
                     self.note.setText("Ошибка базы данных. Введённые значения не сохранены.")
                 elif getattr(self, "status", None) is not None:
