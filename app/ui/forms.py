@@ -248,6 +248,11 @@ class TenantDialog(QDialog):
         self._load()
 
     def _toggle_archive(self) -> None:
+        if self.pending:
+            QMessageBox.warning(
+                self, "Несохранённые реквизиты",
+                "Сначала сохраните или исправьте незавершённые поля перед архивированием.")
+            return
         with self.database.connection() as conn:
             record = db.get_tenant(conn, self.tenant_id)
         next_archived = not record["is_archived"]
