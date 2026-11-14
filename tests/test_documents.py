@@ -49,7 +49,7 @@ class RenderTests(unittest.TestCase):
         text = text_of(data)
         for token in ("АКТ № 15", "02.11.2026", "ООО «Лаборатория & Ко»",
                       "ИП Елена Вымышленная", "05.10.2026", "30.10.2026",
-                      "100.125", "109.625", "9.500", "11-0704", "105-17",
+                      "100,125", "109,625", "9,500", "11,0704", "105,17", "кВт·ч",
                       "Сто пять рублей 17 копеек", "Сумма НДС:", "0,00",
                       "Ф-11", "Допсоглашение № 2", "Заказчик:"):
             self.assertIn(token, text)
@@ -61,8 +61,8 @@ class RenderTests(unittest.TestCase):
         for token in ("Счет на оплату № 15", "2 ноября 2026", "Учебный банк",
                       "000000000", "11111111111111111111", "00000000000000000000",
                       "Лаборатория & Ко", "ИП Елена Вымышленная", "05.10.2026",
-                      "30.10.2026", "9.500", "11.0704", "105.17", "Сто пять рублей",
-                      "В том числе НДС:", "0-00", "Бухгалтер", "Руководитель"):
+                      "30.10.2026", "9,500", "11,0704", "105,17", "кВт·ч", "Сто пять рублей",
+                      "В том числе НДС:", "0,00", "Бухгалтер", "Руководитель"):
             self.assertIn(token, text)
 
     def test_snapshot_same_pdf_bytes(self):
@@ -76,8 +76,8 @@ class RenderTests(unittest.TestCase):
             values["calculation"].update(consumption=D("1.250"), total_amount=D("88.42"))
             values["amount_in_words"] = "Восемьдесят восемь рублей 42 копейки"
             text = text_of(func(values))
-            self.assertIn("1.250", text)
-            self.assertIn("88.42" if kind == "invoice" else "88-42", text)
+            self.assertIn("1,250", text)
+            self.assertIn("88,42", text)
             self.assertIn("Восемьдесят восемь", text)
 
     def test_zero_and_large_amounts(self):
@@ -137,6 +137,121 @@ class RenderTests(unittest.TestCase):
                     self.assertTrue(data.startswith(b"%PDF-"))
                     self.assertIn("Заказчик:" if kind == "act" else "Бухгалтер", text_of(data))
 
+
+
+class DocumentVisualStyleTests(unittest.TestCase):
+    """Shared typography/formatting; retained original document texts."""
+
+    def test_shared_font_family_a4_and_no_foreign_fonts(self):
+        from reportlab.lib.pagesizes import A4
+        for kind, render in (("act", render_act), ("invoice", render_invoice)):
+            with self.subTest(kind=kind):
+                page = PdfReader(io.BytesIO(render(snapshot(kind)))).pages[0]
+                self.assertAlmostEqual(float(page.mediabox.width), A4[0], delta=.1)
+                self.assertAlmostEqual(float(page.mediabox.height), A4[1], delta=.1)
+                resources = page["/Resources"]["/Font"].get_object()
+                used = {str(obj.get_object()["/BaseFont"]) for obj in resources.values()
+                        if "PTSans-" in str(obj.get_object()["/BaseFont"])
+                        or "PTSerif-" in str(obj.get_object()["/BaseFont"])}
+                self.assertTrue(used, "Bundled font was not used")
+                self.assertTrue(all("PTSans-" in name for name in used), used)
+                self.assertTrue(any("Bold" in name for name in used), used)
+
+    def test_common_page_dimensions_and_multiline_content(self):
+        # ReportLab uses nested text matrices that make generic pypdf visitor
+        # coordinates unreliable; do not claim this is an overlap detector.
+        from reportlab.lib.pagesizes import A4
+        for kind, render in (("act", render_act), ("invoice", render_invoice)):
+            with self.subTest(kind=kind):
+                data = snapshot(kind)
+                data["tenant"]["name"] = "ООО Длинное учебное название " * 13
+                data["performer"]["address"] = ("Учебный реквизит\\n" * 5).rstrip()
+                pdf = PdfReader(io.BytesIO(render(data)))
+                self.assertGreaterEqual(len(pdf.pages), 1)
+                content = " ".join(" ".join(page.extract_text() for page in pdf.pages).split())
+                self.assertIn("ООО Длинное учебное название", content)
+                self.assertIn("Учебный реквизит", content)
+                for page in pdf.pages:
+                    self.assertAlmostEqual(float(page.mediabox.width), A4[0], delta=.1)
+                    self.assertAlmostEqual(float(page.mediabox.height), A4[1], delta=.1)
+
+    def test_exact_decimal_presentation_and_grouping(self):
+        from app.documents.common import quantity, money, act_money, invoice_money
+        from app.documents.common import DocumentRenderError
+        cases = (
+            (D("9.500"), "9,500"),
+            (D("11.0704"), "11,0704"),
+            (D("1000000.000"), "1 000 000,000"),
+            (D("0.000"), "0,000"),
+            (D("1234567.0080"), "1 234 567,0080"),
+        )
+        for value, expected in cases:
+            with self.subTest(value=str(value)):
+                self.assertEqual(quantity(value), expected)
+                self.assertEqual(D(quantity(value).replace(" ", "").replace(",", ".")), value)
+        for func in (money, act_money, invoice_money):
+            self.assertEqual(func(D("105.17")), "105,17")
+            self.assertEqual(func(D("1234567.8")), "1 234 567,80")
+            self.assertEqual(func(D("0")), "0,00")
+            with self.assertRaises(DocumentRenderError):
+                func(D("4.001"))  # No silent change of the financial value.
+
+    def test_both_documents_have_identical_numeric_and_unit_conventions(self):
+        for kind, render in (("act", render_act), ("invoice", render_invoice)):
+            with self.subTest(kind=kind):
+                extracted = text_of(render(snapshot(kind)))
+                for token in ("9,500", "11,0704", "105,17", "кВт·ч", "0,00"):
+                    self.assertIn(token, extracted)
+                for forbidden in ("9.500", "11.0704", "105.17", "кВт.ч.", "0-00"):
+                    self.assertNotIn(forbidden, extracted)
+                self.assertNotRegex(extracted, r"(?<!\\S)кВт(?!·ч)")
+                self.assertIn("Сумма НДС:" if kind == "act" else "В том числе НДС:", extracted)
+
+    def test_invoice_removes_only_product_delivery_warning(self):
+        invoice = text_of(render_invoice(snapshot("invoice")))
+        for removed in ("Внимание!", "условиями поставки товара", "наличие товара на складе",
+                        "самовывозом", "доверенности и паспорта"):
+            self.assertNotIn(removed, invoice)
+        for required in ("Банк получателя", "Получатель", "Поставщик:", "Покупатель:",
+                         "Счет на оплату", "Товары (работы, услуги)", "Всего к оплате:",
+                         "Руководитель", "Бухгалтер"):
+            self.assertIn(required, invoice)
+
+    def test_original_wordings_and_sequence_remain(self):
+        act = " ".join(text_of(render_act(snapshot("act"))).split())
+        invoice = " ".join(text_of(render_invoice(snapshot("invoice"))).split())
+        for phrase in ("Возмещение расходов за потребленную электроэнергию",
+                       "Вышеперечисленные услуги выполнены полностью и в срок.",
+                       "Заказчик претензий по объёму, качеству и срокам оказания услуг не имеет."):
+            self.assertIn(phrase, act)
+        for phrase in ("Возмещение расходов за потребление эл.энергии",
+                       "Всего наименований один, на сумму:", "В том числе НДС:",
+                       "Руководитель", "Бухгалтер"):
+            self.assertIn(phrase, invoice)
+        self.assertLess(invoice.index("Банк получателя"), invoice.index("Счет на оплату"))
+        self.assertLess(invoice.index("Покупатель:"), invoice.index("Итого:"))
+        self.assertLess(act.index("Исполнитель:"), act.index("АКТ №"))
+        self.assertLess(act.index("АКТ №"), act.index("Итого:"))
+
+    def test_large_amounts_and_multi_page_fields_preserve_last_tokens(self):
+        for kind, render in (("act", render_act), ("invoice", render_invoice)):
+            with self.subTest(kind=kind):
+                data = snapshot(kind)
+                data["performer"]["performer_name"] = ("Строка синтетического реквизита\n" * 90
+                                                       + "КОНЕЦ_РЕКВИЗИТА")
+                data["tenant"]["name"] = ("ОченьДлинноеНазвание " * 180
+                                         + "КОНЕЦ_АРЕНДАТОРА")
+                data["calculation"]["consumption"] = D("1000000.000")
+                data["calculation"]["total_amount"] = D("1234567.80")
+                data["amount_in_words"] = "Один миллион двести тридцать четыре тысячи рублей 80 копеек"
+                pdf = render(data)
+                pages = PdfReader(io.BytesIO(pdf)).pages
+                self.assertGreater(len(pages), 1)
+                extracted = " ".join(text_of(pdf).split())
+                for token in ("КОНЕЦ_РЕКВИЗИТА", "КОНЕЦ_АРЕНДАТОРА",
+                              "1 000 000,000", "1 234 567,80", "кВт·ч",
+                              "Итого:"):
+                    self.assertIn(token, extracted)
 
 class FakeService:
     def __init__(self):
@@ -295,7 +410,7 @@ class RealServiceIntegrationTests(unittest.TestCase):
         self.assertEqual((result.successful["act"].number, result.successful["invoice"].number), (1, 1))
         self.assertEqual(self.service.document_status(self.calc["id"], "act"), "current")
         self.assertEqual(self.service.document_status(self.calc["id"], "invoice"), "current")
-        self.assertIn("11.0704", text_of(self.path("b").read_bytes()))
+        self.assertIn("11,0704", text_of(self.path("b").read_bytes()))
 
     def test_regeneration_uses_current_values_and_keeps_date(self):
         first = export_document(self.service, self.calc["id"], "act", self.path("a"),
@@ -307,7 +422,7 @@ class RealServiceIntegrationTests(unittest.TestCase):
         self.assertEqual((first.number, first.document_date), (second.number, second.document_date))
         pdf_text = text_of(self.path("a").read_bytes())
         self.assertIn("Обновлённое учебное", pdf_text)
-        self.assertIn("21.625", pdf_text)
+        self.assertIn("21,625", pdf_text)
         self.assertEqual(self.service.document_status(self.calc["id"], "act"), "current")
         with self.db.connection() as conn:
             self.assertEqual(conn.execute("select count(*) from documents").fetchone()[0], 1)
@@ -317,8 +432,8 @@ class RealServiceIntegrationTests(unittest.TestCase):
         self.service.update_calculation(self.calc["id"], total_amount="46.02", confirm_manual=True)
         export_document(self.service, self.calc["id"], "invoice", self.path("i"))
         invoice = text_of(self.path("i").read_bytes())
-        self.assertIn("8.000", invoice)
-        self.assertIn("46.02", invoice)
+        self.assertIn("8,000", invoice)
+        self.assertIn("46,02", invoice)
 
     def test_missing_tariff_and_invalid_readings_block(self):
         bad = self.service.create_calculation(self.tenant["id"], 2026, 11,
@@ -1007,7 +1122,7 @@ class ReviewZeroPolicyTests(unittest.TestCase):
         self.service.update_calculation(self.calc["id"], total_amount="0.00", confirm_manual=True)
         self.assertTrue(self.service.validate(self.calc["id"]).can_export())
         export_document(self.service, self.calc["id"], "invoice", self.path("zero-manual"))
-        self.assertIn("0.00", text_of(self.path("zero-manual").read_bytes()))
+        self.assertIn("0,00", text_of(self.path("zero-manual").read_bytes()))
 
     def test_zero_consumption_manual_nonzero_amount_still_requires_confirmation(self):
         from app.core.service import ConfirmationRequired
@@ -1024,7 +1139,7 @@ class ReviewZeroPolicyTests(unittest.TestCase):
             self.service.prepare_document(zero["id"], "act")
         export_document(self.service, zero["id"], "act", self.path("zero-nonzero"),
                         confirm_zero=True)
-        self.assertIn("75-00", text_of(self.path("zero-nonzero").read_bytes()))
+        self.assertIn("75,00", text_of(self.path("zero-nonzero").read_bytes()))
 
 
 if __name__ == "__main__":

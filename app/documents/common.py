@@ -16,6 +16,20 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Flowable, Paragraph
 from reportlab.lib.utils import ImageReader
 
+# Shared visual design tokens for the act and invoice (same type family and A4 grid).
+PDF_FONT = "Invoice"  # Bundled PT Sans; keep legacy font aliases registered.
+PAGE_LEFT = PAGE_RIGHT = 56
+PAGE_TOP = 50
+PAGE_BOTTOM = 56
+BODY_SIZE = 9.5
+BODY_LEADING = 12
+SMALL_SIZE = 8.5
+SMALL_LEADING = 10.5
+HEADING_SIZE = 14
+HEADING_LEADING = 18
+TABLE_PADDING = 3
+TABLE_BORDER = 0.65
+
 FONT_DIR = Path(__file__).resolve().parent / "fonts"
 FONT_FILES = {
     "Act": "PT_Serif-Web-Regular.ttf",
@@ -83,21 +97,32 @@ def russian_date(value: date | str, *, words: bool = False) -> str:
 
 
 def quantity(value: Decimal) -> str:
-    if not isinstance(value, Decimal):
-        raise DocumentRenderError("Количество или тариф не является Decimal.")
-    return format(value, "f")
+    """Display a Decimal exactly, preserving fractional zeros and grouping thousands.
+
+    This is presentation only; readings and tariffs are not rounded.
+    Identifiers (INN, account numbers, document numbers) are not fed here.
+    """
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise DocumentRenderError("Количество или тариф не является конечным Decimal.")
+    digits, dot, fraction = format(value, "f").partition(".")
+    sign = "-" if digits.startswith("-") else ""
+    integer = digits.lstrip("-")
+    grouped = f"{int(integer):,}".replace(",", " ")
+    return sign + grouped + ("," + fraction if dot else "")
 
 
-def act_money(value: Decimal) -> str:
-    if not isinstance(value, Decimal):
-        raise DocumentRenderError("Сумма не является Decimal.")
-    return f"{value:.2f}".replace(".", "-")
+def money(value: Decimal) -> str:
+    """Russian monetary display, 2 fractional digits, without silently rounding."""
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise DocumentRenderError("Сумма не является конечным Decimal.")
+    if value != value.quantize(Decimal("0.01")):
+        raise DocumentRenderError("Денежная сумма содержит более двух значащих дробных разрядов.")
+    return format(value, ",.2f").replace(",", " ").replace(".", ",")
 
 
-def invoice_money(value: Decimal) -> str:
-    if not isinstance(value, Decimal):
-        raise DocumentRenderError("Сумма не является Decimal.")
-    return f"{value:,.2f}"
+# Preserve existing helper imports without implementing two competing formats.
+act_money = money
+invoice_money = money
 
 
 def agreement_text(tenant: Mapping[str, Any]) -> str:
@@ -116,7 +141,7 @@ class Signature(Flowable):
     """A signer line with optional independent image overlays."""
 
     def __init__(self, label: str, width: float, *, signature_path: str | None = None,
-                 stamp_path: str | None = None, font: str = "Act", size: float = 10):
+                 stamp_path: str | None = None, font: str = PDF_FONT, size: float = BODY_SIZE):
         super().__init__()
         self.label = label
         self.width = width
