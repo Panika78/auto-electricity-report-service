@@ -58,6 +58,24 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertTrue(path.is_file())
             self.default_database_path.assert_not_called()
 
+    def test_startup_initial_settings_failure_does_not_show_empty_window(self):
+        import sqlite3
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from app.main import main
+        path = Path(self.temporary.name) / "settings-failure.db"
+        with mock.patch("app.ui.main_window.SettingsPage",
+                        side_effect=sqlite3.OperationalError("database is locked")), \
+             mock.patch.object(QMessageBox, "critical") as critical, \
+             mock.patch.object(QApplication, "exec",
+                               side_effect=AssertionError("Startup must stop on load failure")) as run:
+            self.assertEqual(main(db_path=path), 1)
+            critical.assert_called_once()
+            self.assertEqual(critical.call_args.args[1], "Ошибка загрузки интерфейса")
+            self.assertIn("database is locked", critical.call_args.args[2])
+            run.assert_not_called()
+        self.assertTrue(path.is_file())
+        self.default_database_path.assert_not_called()
+
     def test_startup_initialization_error_is_reported(self):
         from PySide6.QtWidgets import QMessageBox
         from app.main import main
