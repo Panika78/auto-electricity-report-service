@@ -19,6 +19,7 @@ from app.core.service import CalculationService
 from app.data import database as db
 from app.data import queries
 from app.documents import ExportError, export_document, safe_filename
+from app.documents.export import _assert_unique_destinations
 from .common import (CANCELLED, appearance_settings, apply_appearance, image_directory,
                      import_image, remove_managed_image, parse_number, run_confirmed, show_error, show_number)
 
@@ -372,6 +373,8 @@ class CalculationDialog(QDialog):
         outer.addLayout(form)
 
         actions = QHBoxLayout()
+        self.open_tenant_button = self._button("Карточка арендатора", self._open_tenant)
+        actions.addWidget(self.open_tenant_button)
         actions.addWidget(self._button("Ручной расход", self._edit_consumption))
         actions.addWidget(self._button("Ручная сумма", self._edit_amount))
         actions.addWidget(self._button("PDF акта / счёта", self._export))
@@ -579,6 +582,25 @@ class CalculationDialog(QDialog):
             self.calculation_id, **{field: number}, **flags))
         if result is not CANCELLED:
             self._refresh()
+
+    def _open_tenant(self) -> None:
+        """Navigate directly from a calculation to its tenant and full history."""
+        if self.pending:
+            QMessageBox.warning(
+                self, "Несохранённые изменения",
+                "Сначала сохраните или исправьте незавершённые поля.")
+            return
+        tenant_id = self.tenant_picker.currentData()
+        if tenant_id is None:
+            QMessageBox.information(self, "Арендатор", "Выберите арендатора.")
+            return
+        try:
+            dialog = TenantDialog(self.service, self.database, tenant_id=tenant_id, parent=self)
+            dialog.exec()
+            self._load_tenants()
+            self._refresh()
+        except (sqlite3.Error, OSError, LookupError, RuntimeError) as error:
+            show_error(self, error, "Не удалось открыть арендатора")
 
     def _edit_consumption(self) -> None:
         self._manual("consumption", "Ручной расход", 3)
@@ -898,9 +920,6 @@ class ExportDialog(QDialog):
             path = Path(output).expanduser().absolute()
             if path.suffix.lower() != ".pdf":
                 path = path.with_suffix(".pdf")
-            if path in paths.values():
-                QMessageBox.warning(self, "Совпадающие пути", "Для акта и счёта нужны разные файлы.")
-                return
             exists = path.exists() or path.is_symlink()
             if exists and QMessageBox.question(
                 self, "Файл уже существует",
@@ -911,6 +930,15 @@ class ExportDialog(QDialog):
             paths[kind] = path
             overwrite[kind] = exists
 
+        # Compare physical destinations as in app.documents.export: covers
+        # path/../ aliases, symlinked parent directories and existing hardlinks.
+        # The whole pair must pass before the FIRST PDF or DB metadata change.
+        try:
+            _assert_unique_destinations(paths)
+        except (ValueError, OSError) as error:
+            show_error(self, error, "Совпадающие пути PDF")
+            return
+
         success = []
         errors = []
         for kind, path in paths.items():
@@ -919,7 +947,10 @@ class ExportDialog(QDialog):
                 result = export_document(
                     self.service, self.calculation_id, kind, path,
                     overwrite=overwrite[kind], number=number, document_date=day,
-                    confirm_zero=confirm_zero, confirm_duplicate=duplicated.get(kind, False))
+                    confirm_zero=confirm_zero, confirm_duplicate=duplicated.get(kind, False),
+                    # Repeat the same check immediately before publication,
+                    # since a file or parent directory can change between dialogs.
+                    _pre_publish=lambda: _assert_unique_destinations(paths))
                 summary = ("Акт" if kind == "act" else "Счёт") + f": {result.path}"
                 if result.cleanup_warning:
                     summary += "\nПРЕДУПРЕЖДЕНИЕ: " + result.cleanup_warning
