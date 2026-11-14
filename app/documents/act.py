@@ -12,7 +12,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from .common import (BODY_LEADING, BODY_SIZE, HEADING_LEADING, HEADING_SIZE, PAGE_BOTTOM,
                      PAGE_LEFT, PAGE_RIGHT, PAGE_TOP, PDF_FONT, SMALL_LEADING,
                      SMALL_SIZE, TABLE_BORDER, TABLE_PADDING, Signature, act_money,
-                     agreement_text, check_images, paragraph, quantity, register_fonts,
+                     agreement_text, check_images, paragraph, ptext, quantity, register_fonts,
                      required_snapshot, russian_date, style)
 
 
@@ -36,17 +36,44 @@ def render_act(snapshot: Mapping[str, Any]) -> bytes:
                             title="Акт", pageCompression=1)
     width = doc.width
 
-    performer_info = "\n".join(filter(None, ("Исполнитель:", performer.get("performer_name"),
-                          performer.get("address"),
-                          "ИНН " + performer["inn"] if performer.get("inn") else "")))
-    tenant_info = "\n".join(filter(None, ("Заказчик:", tenant.get("name"),
-                         tenant.get("legal_address"))))
-    parties = Table([[paragraph(performer_info, body), paragraph(tenant_info, body)]],
-                    colWidths=[width * .65, width * .35], splitInRow=1)
-    parties.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
-                                  ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                                  ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                                  ("TOPPADDING", (0, 0), (-1, -1), 0)]))
+    # Keep the two-party Word layout, but use equal visual weight.
+    # Every interpolated value is escaped: only these fixed font tags are markup.
+    party_style = style("act_party", PDF_FONT, 9.0, leading=12.8)
+
+    def party(label: str, name: str | None, details: list[str | None]) -> Paragraph:
+        lines = [
+            f'<font name="{PDF_FONT}Bold" size="8.4">{ptext(label)}</font>'
+        ]
+        if name:
+            lines.append(
+                f'<font name="{PDF_FONT}Bold" size="10.1">{ptext(name)}</font>'
+            )
+        for detail in details:
+            if detail:
+                lines.append(
+                    f'<font name="{PDF_FONT}" size="9.0">{ptext(detail)}</font>'
+                )
+        return Paragraph("<br/>".join(lines), party_style)
+
+    performer_info = party(
+        "Исполнитель:", performer.get("performer_name"),
+        [performer.get("address"),
+         "ИНН " + str(performer["inn"]) if performer.get("inn") else None],
+    )
+    tenant_info = party(
+        "Заказчик:", tenant.get("name"), [tenant.get("legal_address")],
+    )
+    gutter = 20
+    column = (width - gutter) / 2
+    parties = Table([[performer_info, "", tenant_info]],
+                    colWidths=[column, gutter, column], splitInRow=1)
+    parties.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
 
     agreement = agreement_text(tenant)
     item = ("Возмещение расходов за потребленную электроэнергию за период\n"
@@ -93,7 +120,7 @@ def render_act(snapshot: Mapping[str, Any]) -> bytes:
                                     ("LEFTPADDING", (0, 0), (-1, -1), 0),
                                     ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
     story = [
-        parties, Spacer(1, 40),
+        parties, Spacer(1, 34),
         paragraph(f"АКТ № {document['number']} от {russian_date(document['document_date'])}г.", head),
         Spacer(1, 42), table, totals, Spacer(1, 20),
         paragraph(f"Всего оказано услуг 1, на сумму {act_money(calc['total_amount'])} "

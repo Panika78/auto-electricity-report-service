@@ -139,6 +139,65 @@ class RenderTests(unittest.TestCase):
 
 
 
+class ActHeaderLayoutTests(unittest.TestCase):
+    """The act uses balanced, borderless party columns with three text levels."""
+
+    def test_party_labels_align_and_names_use_bolder_larger_type(self):
+        page = PdfReader(io.BytesIO(render_act(snapshot("act")))).pages[0]
+        fragments = []
+
+        def collect(text, cm, tm, font, size):
+            if text.strip():
+                fragments.append((text.strip(), round(float(size), 1), float(cm[4] + tm[4]),
+                                  str(font.get("/BaseFont", "")) if font else ""))
+
+        page.extract_text(visitor_text=collect)
+        left = next(f for f in fragments if f[0] == "Исполнитель:" and f[1] == 8.4)
+        right = next(f for f in fragments if f[0] == "Заказчик:" and f[1] == 8.4)
+        self.assertAlmostEqual(left[2], 56, delta=2)
+        self.assertAlmostEqual(right[2], 308, delta=3)
+        self.assertGreater(right[2] - left[2], 235)  # Consistent ~20 pt gutter.
+        for party_name in ("ИП Елена Вымышленная", "ООО «Лаборатория & Ко»"):
+            name = next(f for f in fragments if f[0] == party_name)
+            self.assertAlmostEqual(name[1], 10.1, delta=.1)
+            self.assertIn("Bold", name[3])
+        address = next(f for f in fragments if f[0].startswith("г. Тестоград"))
+        self.assertAlmostEqual(address[1], 9.0, delta=.1)
+        self.assertNotIn("Bold", address[3])
+
+    def test_different_lengths_missing_fields_and_html_escaping(self):
+        values = snapshot("act")
+        values["tenant"]["name"] = "ООО <Проверка> & «Лаборатория» " * 7
+        values["tenant"]["legal_address"] = "г. Тестовый, улица Большая\\nстроение 11 & <корпус>"
+        values["performer"]["performer_name"] = "ИП Краткая"
+        values["performer"].update(address=None, inn="")
+        pdf = render_act(values)
+        reader = PdfReader(io.BytesIO(pdf))
+        self.assertEqual(len(reader.pages), 1)
+        text = text_of(pdf)
+        self.assertIn("<Проверка> & «Лаборатория»", text)
+        self.assertIn("<корпус>", text)
+        self.assertNotIn("ИНН 000000000000", text)
+        self.assertIn("Исполнитель:", text)
+        self.assertIn("Заказчик:", text)
+        self.assertIn("АКТ № 15", text)
+        self.assertIn("Сумма НДС:", text)
+        self.assertIn("Заказчик претензий", text)
+
+    def test_both_multi_page_party_columns_preserve_last_lines(self):
+        values = snapshot("act")
+        values["performer"]["performer_name"] = "Индивидуальный предприниматель " * 22
+        values["performer"]["address"] = ("Адрес исполнителя\\n" * 96) + "КОНЕЦ_ИСПОЛНИТЕЛЯ"
+        values["tenant"]["name"] = ("Синтетическое юридическое лицо " * 130) + "КОНЕЦ_НАЗВАНИЯ"
+        values["tenant"]["legal_address"] = ("Адрес заказчика\\n" * 105) + "КОНЕЦ_ЗАКАЗЧИКА"
+        document = render_act(values)
+        self.assertGreater(len(PdfReader(io.BytesIO(document)).pages), 1)
+        text = text_of(document)
+        for part in ("КОНЕЦ_ИСПОЛНИТЕЛЯ", "КОНЕЦ_НАЗВАНИЯ",
+                     "КОНЕЦ_ЗАКАЗЧИКА", "Итого:", "Заказчик:"):
+            self.assertIn(part, text)
+
+
 class DocumentVisualStyleTests(unittest.TestCase):
     """Shared typography/formatting; retained original document texts."""
 
