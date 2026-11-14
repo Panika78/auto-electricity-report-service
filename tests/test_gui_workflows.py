@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import date
