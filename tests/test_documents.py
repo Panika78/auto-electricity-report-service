@@ -170,7 +170,11 @@ class DocumentVisualStyleTests(unittest.TestCase):
                 self.assertGreaterEqual(len(pdf.pages), 1)
                 content = " ".join(" ".join(page.extract_text() for page in pdf.pages).split())
                 self.assertIn("ООО Длинное учебное название", content)
-                self.assertIn("Учебный реквизит", content)
+                # The source invoice has no address block; only the act has it.
+                if kind == "act":
+                    self.assertIn("Учебный реквизит", content)
+                else:
+                    self.assertNotIn("Учебный реквизит", content)
                 for page in pdf.pages:
                     self.assertAlmostEqual(float(page.mediabox.width), A4[0], delta=.1)
                     self.assertAlmostEqual(float(page.mediabox.height), A4[1], delta=.1)
