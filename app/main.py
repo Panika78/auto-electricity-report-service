@@ -12,7 +12,7 @@ def main(db_path: Path | str | None = None) -> int:
     from app.ui.main_window import MainWindow
 
     app = QApplication.instance() or QApplication([])
-    app.setApplicationName("Контакт")
+    app.setApplicationName("контакт")
 
     try:
         database = Database(db_path)
