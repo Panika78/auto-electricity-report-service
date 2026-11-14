@@ -678,6 +678,126 @@ class NativeWorkflowTests(unittest.TestCase):
         self.assertEqual(dialog.history.rowCount(), 1)
         dialog.close()
 
+    def test_initial_archived_tenant_load_fails_closed_and_opens_after_recovery(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import TenantDialog
+        from app.ui.main_window import MainWindow
+        from app.data import database as db
+        tenant = self._tenant(inn="1234567890", initial_reading="42")
+        calc = self.service.create_calculation(tenant["id"], 2026, 10)
+        self.service.update_tenant(tenant["id"], is_archived=True)
+        window = MainWindow(self.database)
+        self.assertEqual(window.archive_table.rowCount(), 1)
+        window.archive_table.selectRow(0)
+        with mock.patch.object(self.database, "connection",
+                               side_effect=sqlite3.OperationalError("database is locked")), \
+             mock.patch.object(QMessageBox, "critical") as critical, \
+             mock.patch.object(TenantDialog, "exec",
+                               side_effect=AssertionError("Unloaded card was displayed")) as exec_dialog:
+            with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+                TenantDialog(self.service, self.database, tenant_id=tenant["id"])
+            critical.assert_not_called()  # caller, not half-built dialog, owns error UI
+            window.open_selected_tenant(archived=True)
+            critical.assert_called_once()
+            self.assertIn("database is locked", critical.call_args.args[2])
+            exec_dialog.assert_not_called()
+        with self.database.connection() as conn:
+            record = db.get_tenant(conn, tenant["id"])
+            self.assertEqual(record["name"], "ООО Тест")
+            self.assertEqual(record["inn"], "1234567890")
+            self.assertEqual(record["is_archived"], 1)
+        recovered = TenantDialog(self.service, self.database, tenant_id=tenant["id"])
+        self.assertEqual(recovered.fields["name"].text(), "ООО Тест")
+        self.assertEqual(recovered.fields["inn"].text(), "1234567890")
+        self.assertEqual(recovered.archive_button.text(), "Восстановить арендатора")
+        self.assertEqual(recovered.history.rowCount(), 1)
+        self.assertEqual(recovered.history.item(0, 0).text(), str(calc["id"]))
+        recovered.close()
+        window.close()
+
+    def test_initial_tenant_history_failure_aborts_open_instead_of_lying(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import TenantDialog
+        from app.data import database as db
+        tenant = self._tenant(inn="24680")
+        # The first connection (card data) works; history read then fails.
+        original = self.database.connection
+        attempts = []
+        def fail_second_read():
+            attempts.append(1)
+            if len(attempts) == 2:
+                raise sqlite3.OperationalError("database is locked")
+            return original()
+        with mock.patch.object(self.database, "connection", side_effect=fail_second_read), \
+             mock.patch.object(QMessageBox, "critical") as critical:
+            with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+                TenantDialog(self.service, self.database, tenant_id=tenant["id"])
+            critical.assert_not_called()
+        recovered = TenantDialog(self.service, self.database, tenant_id=tenant["id"])
+        self.assertEqual(recovered.fields["inn"].text(), "24680")
+        with self.database.connection() as conn:
+            self.assertEqual(db.get_tenant(conn, tenant["id"])["inn"], "24680")
+        recovered.close()
+
+    def test_initial_new_calculation_load_fails_closed_and_opens_after_recovery(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import CalculationDialog
+        from app.ui.main_window import MainWindow
+        tenant = self._tenant()
+        window = MainWindow(self.database)
+        with mock.patch.object(self.database, "connection",
+                               side_effect=sqlite3.OperationalError("database is locked")), \
+             mock.patch.object(QMessageBox, "critical") as critical, \
+             mock.patch.object(CalculationDialog, "exec",
+                               side_effect=AssertionError("Unloaded calculation was displayed")) as exec_dialog:
+            with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+                CalculationDialog(self.service, self.database, year=2026, month=10)
+            critical.assert_not_called()
+            window.new_calculation()
+            critical.assert_called_once()
+            self.assertIn("database is locked", critical.call_args.args[2])
+            exec_dialog.assert_not_called()
+        dialog = CalculationDialog(self.service, self.database, year=2026, month=10)
+        self.assertEqual(dialog.tenant_picker.count(), 1)
+        self.assertEqual(dialog.tenant_picker.currentData(), tenant["id"])
+        dialog.close()
+        window.close()
+
+    def test_initial_existing_calculation_refresh_fails_closed(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import CalculationDialog
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="10", end_reading="25")
+        with mock.patch("app.ui.forms.queries.month_tariff",
+                        side_effect=sqlite3.OperationalError("database is locked")), \
+             mock.patch.object(QMessageBox, "critical") as critical:
+            with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+                CalculationDialog(self.service, self.database, calculation_id=calc["id"])
+            critical.assert_not_called()
+        dialog = CalculationDialog(self.service, self.database, calculation_id=calc["id"])
+        self.assertEqual(dialog.end_edit.text(), "25")
+        self.assertIn("Готов", dialog.status.text())
+        dialog.close()
+
+    def test_initial_performer_settings_load_fails_closed_and_recovers(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import SettingsPage
+        from app.data import database as db
+        self.service.update_settings(performer_name="Исходный исполнитель")
+        with mock.patch.object(self.database, "connection",
+                               side_effect=sqlite3.OperationalError("database is locked")), \
+             mock.patch.object(QMessageBox, "critical") as critical:
+            with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+                SettingsPage(self.service)
+            critical.assert_not_called()
+        page = SettingsPage(self.service)
+        self.assertEqual(page.fields["performer_name"].text(), "Исходный исполнитель")
+        with self.database.connection() as conn:
+            self.assertEqual(db.get_settings(conn)["performer_name"], "Исходный исполнитель")
+        page.close()
+
     def test_headless_export_negative_cases_exit_in_separate_processes(self):
         root = Path(__file__).resolve().parent.parent
         environment = os.environ.copy()
