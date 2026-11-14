@@ -434,11 +434,13 @@ class MainWindow(QMainWindow):
             return None
         return int(listing.item(selected, 0).text())
 
+    @database_error_dialog
     def new_calculation(self) -> None:
         dlg = CalculationDialog(self.service, self.database, year=self.year, month=self.month, parent=self)
         if dlg.exec():
             self._refresh_all()
 
+    @database_error_dialog
     def open_selected_calculation(self) -> None:
         calc_id = self.selected_id(self.calc_table)
         if calc_id is not None:
@@ -457,22 +459,26 @@ class MainWindow(QMainWindow):
         tenant_dialog.exec()
         self._refresh_all()
 
+    @database_error_dialog
     def export_selected_calculation(self) -> None:
         calc_id = self.selected_id(self.calc_table)
         if calc_id is not None:
             ExportDialog(self.service, self.database, calc_id, self).exec()
             self.refresh_calculations()
 
+    @database_error_dialog
     def new_tenant(self) -> None:
         if TenantDialog(self.service, self.database, parent=self).exec():
             self._refresh_all()
 
+    @database_error_dialog
     def open_selected_tenant(self, archived: bool = False) -> None:
         tenant_id = self.selected_id(self.archive_table if archived else self.tenant_table)
         if tenant_id is not None:
             TenantDialog(self.service, self.database, tenant_id=tenant_id, parent=self).exec()
             self._refresh_all()
 
+    @database_error_dialog
     def toggle_selected_archive(self, archived: bool) -> None:
         tenant_id = self.selected_id(self.archive_table if archived else self.tenant_table)
         if tenant_id is None:
