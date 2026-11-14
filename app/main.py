@@ -26,7 +26,7 @@ def main(db_path: Path | str | None = None) -> int:
         )
         return 1
 
-    window = MainWindow()
+    window = MainWindow(database)
     window.show()
     return app.exec()
 
