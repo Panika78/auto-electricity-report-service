@@ -106,6 +106,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(THEME)
         apply_appearance()
         self._build()
+        apply_appearance()
         self._refresh_all()
 
     def _build(self) -> None:
@@ -160,7 +161,7 @@ class MainWindow(QMainWindow):
     def _heading(self, title: str, subtitle: str):
         group = QVBoxLayout()
         heading = QLabel(title)
-        heading.setStyleSheet("font-size:27px; font-weight:700; color:#1b2b30;")
+        heading.setProperty("kontaktHeadingSize", 27)
         detail = QLabel(subtitle)
         detail.setStyleSheet("color:#657276;")
         group.addWidget(heading)
@@ -363,7 +364,7 @@ class MainWindow(QMainWindow):
                       show_number(calc["consumption"]),
                       show_number(tariff["rate"] if tariff else None),
                       show_number(calc["total_amount"]),
-                      "Готов" if checked.ready else "Не готов", a, i]
+                      "Готов" if checked.ready else "Не готов: " + (checked.errors[0] if checked.errors else "неполные данные"), a, i]
             for column, value in enumerate(values):
                 tooltip = "; ".join(checked.errors + checked.warnings) if column == 8 else ""
                 if column == 1 and tenant.get("is_archived"):
