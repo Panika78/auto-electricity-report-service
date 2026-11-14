@@ -458,3 +458,21 @@ class MainWindow(QMainWindow):
         if result is not CANCELLED:
             self._refresh_all()
             self.statusBar().showMessage("Изменение сохранено")
+
+
+    def closeEvent(self, event) -> None:
+        # Persist the currently active performer field before application exit.
+        for field in tuple(self.settings_page.pending):
+            self.settings_page._save_field(field)
+        if self.settings_page.pending:
+            answer = QMessageBox.question(
+                self, "Несохранённые настройки",
+                "Изменения реквизитов не удалось сохранить. Закрыть приложение без них?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                self.navigate("settings")
+                return
+        event.accept()
