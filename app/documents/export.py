@@ -39,13 +39,21 @@ class ExportError(RuntimeError):
     def __init__(self, message: str, *, path: Path | None = None,
                  recovery_failed: bool = False, backup_path: Path | None = None,
                  recovery_error: BaseException | None = None,
-                 cleanup_error: BaseException | None = None) -> None:
+                 cleanup_error: BaseException | None = None,
+                 staged_path: Path | None = None,
+                 partial_path: Path | None = None,
+                 quarantine_path: Path | None = None,
+                 cleanup_errors: tuple[BaseException, ...] = ()) -> None:
         super().__init__(message)
         self.path = path
         self.recovery_failed = recovery_failed
         self.backup_path = backup_path
+        self.staged_path = staged_path
+        self.partial_path = partial_path
+        self.quarantine_path = quarantine_path
         self.recovery_error = recovery_error
         self.cleanup_error = cleanup_error
+        self.cleanup_errors = cleanup_errors or ((cleanup_error,) if cleanup_error is not None else ())
 
 
 class ExportCancelled(ExportError):
@@ -62,6 +70,7 @@ class ExportedDocument:
     # A successfully published document stays successful if backup cleanup fails.
     cleanup_warning: str | None = None
     leftover_backup: Path | None = None
+    leftover_staged: Path | None = None
 
 
 @dataclass
@@ -143,32 +152,65 @@ def _assert_unique_destinations(paths: Mapping[str, Path]) -> None:
                 raise ValueError("Акт и счёт ссылаются на один физический целевой файл.")
 
 
+
 def _stage_pdf(path: Path, data: bytes) -> Path:
     fd, name = tempfile.mkstemp(prefix=".kontakt-pdf-", suffix=".tmp", dir=path.parent)
     staged = Path(name)
+    open_fd: int | None = fd
+    identity: tuple[int, int] | None = None
     try:
-        with os.fdopen(fd, "wb") as out:
+        info = os.fstat(fd)
+        identity = info.st_dev, info.st_ino
+        output = os.fdopen(fd, "wb")
+        open_fd = None
+        with output as out:
             out.write(data)
             out.flush()
             os.fsync(out.fileno())
         return staged
-    except BaseException:
-        staged.unlink(missing_ok=True)
+    except BaseException as original:
+        if open_fd is not None:
+            os.close(open_fd)
+        try:
+            if identity is None:
+                raise OSError("Идентификатор staged PDF неизвестен; удаление запрещено.")
+            _unlink_if_owned(staged, identity)
+        except BaseException as cleanup:
+            raise ExportError(
+                "Не удалось удалить неполный временный PDF после ошибки записи.",
+                staged_path=staged, cleanup_error=cleanup,
+            ) from original
         raise
 
 
 def _backup(path: Path) -> Path:
     fd, name = tempfile.mkstemp(prefix=".kontakt-backup-", suffix=".pdf", dir=path.parent)
     backup = Path(name)
+    open_fd: int | None = fd
+    identity: tuple[int, int] | None = None
     try:
-        # Do not copy source permissions: mkstemp creates private mode 0600.
-        with os.fdopen(fd, "wb") as out, path.open("rb") as source:
+        info = os.fstat(fd)
+        identity = info.st_dev, info.st_ino
+        output = os.fdopen(fd, "wb")
+        open_fd = None
+        # mkstemp uses private permissions; do not copy source mode.
+        with output as out, path.open("rb") as source:
             shutil.copyfileobj(source, out)
             out.flush()
             os.fsync(out.fileno())
         return backup
-    except BaseException:
-        backup.unlink(missing_ok=True)
+    except BaseException as original:
+        if open_fd is not None:
+            os.close(open_fd)
+        try:
+            if identity is None:
+                raise OSError("Идентификатор backup PDF неизвестен; удаление запрещено.")
+            _unlink_if_owned(backup, identity)
+        except BaseException as cleanup:
+            raise ExportError(
+                "Не удалось удалить неполную резервную копию после ошибки записи.",
+                backup_path=backup, cleanup_error=cleanup,
+            ) from original
         raise
 
 
@@ -201,20 +243,108 @@ def _publish_new_file(staged: Path, target: Path) -> None:
     # O_EXCL is essential: never open the target in truncating 'wb' mode.
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     fd = os.open(target, flags, 0o600)
-    identity = os.fstat(fd).st_dev, os.fstat(fd).st_ino
+    open_fd: int | None = fd
+    identity: tuple[int, int] | None = None
     try:
-        with os.fdopen(fd, "wb") as out, staged.open("rb") as source:
+        info = os.fstat(fd)
+        identity = info.st_dev, info.st_ino
+        output = os.fdopen(fd, "wb")
+        open_fd = None
+        with output as out, staged.open("rb") as source:
             shutil.copyfileobj(source, out, length=1024 * 1024)
             out.flush()
             os.fsync(out.fileno())
     except BaseException as original:
+        if open_fd is not None:
+            os.close(open_fd)
         try:
+            if identity is None:
+                raise OSError("Идентификатор частичного PDF неизвестен; удаление запрещено.")
             _unlink_if_owned(target, identity)
-        except OSError as cleanup:
+        except BaseException as cleanup:
             raise ExportError(
                 "Запись PDF прервана; неполный файл не удалось удалить.",
-                path=target, recovery_failed=True, cleanup_error=cleanup
+                path=target, partial_path=target, recovery_failed=True,
+                cleanup_error=cleanup
             ) from original
+        raise
+
+
+class _UnsafeRollback(OSError):
+    """Rollback could not safely complete; a quarantined file may need recovery."""
+
+    def __init__(self, message: str, quarantined_path: Path | None = None) -> None:
+        super().__init__(message)
+        self.quarantined_path = quarantined_path
+
+
+def _rollback_published(target: Path, backup: Path | None,
+                        published_identity: tuple[int, int] | None
+                        ) -> tuple[Path | None, BaseException | None]:
+    """Restore without replacing a foreign file in a check/replace race.
+
+    First move the current target to a private quarantine, then verify *what
+    was actually moved*. Restore the backup through no-clobber publication.
+    If another process wins the race, leave backup/quarantine for manual
+    recovery instead of overwriting that process's PDF.
+    """
+    if published_identity is None:
+        raise _UnsafeRollback("Идентификатор опубликованного PDF неизвестен; откат запрещён.")
+    if _identity(target) != published_identity:
+        raise _UnsafeRollback("Целевой PDF заменён другим процессом; откат запрещён.")
+
+    fd, name = tempfile.mkstemp(prefix=".kontakt-rollback-", suffix=".pdf", dir=target.parent)
+    try:
+        placeholder = os.fstat(fd)
+    finally:
+        os.close(fd)
+    quarantine = Path(name)
+    moved = False
+    try:
+        os.replace(target, quarantine)
+        moved = True
+        moved_identity = _identity(quarantine)
+        if moved_identity != published_identity:
+            # The other process changed the file *after* our first check.
+            # Return its exact contents without clobbering a new target.
+            try:
+                _publish_new_file(quarantine, target)
+                _unlink_if_owned(quarantine, moved_identity)
+            except BaseException as exc:
+                raise _UnsafeRollback(
+                    "Чужой PDF перемещён в карантин; требуется ручное восстановление.",
+                    quarantine,
+                ) from exc
+            raise _UnsafeRollback(
+                "Во время отката был обнаружен чужой PDF; он восстановлен без перезаписи."
+            )
+
+        if backup is not None:
+            # Unlike os.replace(backup, target), this cannot clobber a file
+            # created by another process after target was moved.
+            _publish_new_file(backup, target)
+        try:
+            _unlink_if_owned(quarantine, published_identity)
+        except BaseException as cleanup:
+            # The previous PDF is restored (or the new one removed); leaving
+            # a private copy of the published PDF is only a cleanup problem.
+            return quarantine, cleanup
+        return None, None
+    except BaseException as exc:
+        if moved:
+            if isinstance(exc, _UnsafeRollback):
+                raise
+            raise _UnsafeRollback(
+                "Безопасный откат не завершён; временный PDF сохранён.",
+                quarantine,
+            ) from exc
+        try:
+            _unlink_if_owned(quarantine, (placeholder.st_dev, placeholder.st_ino))
+        except OSError as cleanup:
+            raise _UnsafeRollback(
+                "Не удалось удалить временный файл неудачного отката.",
+                quarantine,
+            ) from exc
         raise
 
 
@@ -249,26 +379,34 @@ def export_document(service: CalculationService, calculation_id: int, kind: str,
         raise ExportError("Данные изменились во время подготовки PDF; файл не записан.")
 
     staged: Path | None = None
+    staged_identity: tuple[int, int] | None = None
+    leftover_staged: Path | None = None
     backup: Path | None = None
+    backup_identity: tuple[int, int] | None = None
     published_identity: tuple[int, int] | None = None
+    quarantine_path: Path | None = None
     saved = False
     marked = False
     error: BaseException | None = None
     recovery_error: BaseException | None = None
-    cleanup_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
     try:
         staged = _stage_pdf(target, pdf_bytes)
+        staged_identity = _identity(staged)
         _validate_target(target, overwrite)
         if _pre_publish is not None:
             _pre_publish()  # Re-evaluate aliases just before file publication.
         if overwrite:
             if target.exists():
                 backup = _backup(target)
+                backup_identity = _identity(backup)
             os.replace(staged, target)
             staged = None
         else:
             _publish_new_file(staged, target)
         saved = True
+        # If stat fails here, ownership is UNKNOWN: never restore by replacing
+        # the target, even if the previous file has a valid backup.
         published_identity = _identity(target)
         service.mark_document_generated(document["id"], expected_revision=snapshot["revision"])
         marked = True
@@ -276,59 +414,85 @@ def export_document(service: CalculationService, calculation_id: int, kind: str,
         error = exc
         if saved:
             try:
-                if published_identity is not None and _identity(target) != published_identity:
-                    raise OSError("PDF изменён после публикации; автоматический откат небезопасен.")
-                if backup is not None:
-                    os.replace(backup, target)
-                    backup = None  # Consumed by successful restoration.
-                else:
-                    _unlink_if_owned(target, published_identity)
+                quarantine_path, quarantine_cleanup = _rollback_published(
+                    target, backup, published_identity)
+                if quarantine_cleanup is not None:
+                    cleanup_errors.append(quarantine_cleanup)
             except BaseException as rollback_exc:
                 recovery_error = rollback_exc
+                quarantine_path = getattr(rollback_exc, "quarantined_path", None)
     finally:
         if staged is not None:
             try:
-                staged.unlink(missing_ok=True)
-            except OSError as exc:
-                cleanup_error = exc
+                if staged_identity is None:
+                    raise OSError("Идентификатор staged PDF неизвестен; удаление запрещено.")
+                _unlink_if_owned(staged, staged_identity)
+            except BaseException as cleanup:
+                cleanup_errors.append(cleanup)
+                leftover_staged = staged
 
     if error is not None:
-        # A backup is *never* deleted after failed recovery. The path is
-        # returned explicitly so the user can restore it manually.
+        # A backup is never deleted when recovery has failed. On successful
+        # recovery or a pre-publication failure it is normally no longer needed.
         if backup is not None and recovery_error is None:
             try:
-                backup.unlink()
-            except OSError as exc:
-                cleanup_error = exc
-        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                if backup_identity is None:
+                    raise OSError("Идентификатор backup PDF неизвестен; удаление запрещено.")
+                _unlink_if_owned(backup, backup_identity)
+            except BaseException as cleanup:
+                cleanup_errors.append(cleanup)
+            else:
+                backup = None
+        previous = error if isinstance(error, ExportError) else None
+        additional = list(previous.cleanup_errors) if previous is not None else []
+        additional.extend(cleanup_errors)
+        if isinstance(error, (KeyboardInterrupt, SystemExit)) and not recovery_error and not additional:
             raise error
-        if isinstance(error, ExportError) and not saved and cleanup_error is None:
+        if isinstance(error, ExportError) and not saved and not additional:
             raise error
+
         message = "Не удалось завершить экспорт PDF; отметка генерации не установлена."
         if recovery_error is not None:
-            message += " Восстановление прежнего файла не удалось; резервная копия сохранена."
-        if cleanup_error is not None:
-            message += " Не удалось удалить временный файл."
-        raise ExportError(message, path=target if recovery_error else None,
-                          recovery_failed=recovery_error is not None,
-                          backup_path=backup if recovery_error else None,
-                          recovery_error=recovery_error,
-                          cleanup_error=cleanup_error) from error
+            message += " Безопасное восстановление не завершено; проверьте сохранённые файлы."
+        if additional:
+            message += " Остались файлы, требующие ручной очистки."
+        backup_path = backup if backup is not None else (previous.backup_path if previous else None)
+        partial_path = previous.partial_path if previous else None
+        staged_path = leftover_staged or (previous.staged_path if previous else None)
+        quarantine = quarantine_path or (previous.quarantine_path if previous else None)
+        raise ExportError(
+            message,
+            path=target if recovery_error is not None else (previous.path if previous else None),
+            recovery_failed=recovery_error is not None or (previous.recovery_failed if previous else False),
+            backup_path=backup_path,
+            staged_path=staged_path,
+            partial_path=partial_path,
+            quarantine_path=quarantine,
+            recovery_error=recovery_error or (previous.recovery_error if previous else None),
+            cleanup_error=additional[0] if additional else None,
+            cleanup_errors=tuple(additional),
+        ) from error
 
     # The database already records a successful export. Cleanup cannot undo it.
     warnings = []
-    leftover = None
+    leftover_backup = None
     if backup is not None:
         try:
-            backup.unlink()
-        except OSError:
-            leftover = backup
+            if backup_identity is None:
+                raise OSError("Идентификатор backup PDF неизвестен; удаление запрещено.")
+            _unlink_if_owned(backup, backup_identity)
+        except BaseException as cleanup:
+            leftover_backup = backup
+            cleanup_errors.append(cleanup)
             warnings.append("Не удалось удалить конфиденциальную резервную копию PDF; удалите её вручную.")
-    if cleanup_error is not None:
-        warnings.append("Не удалось удалить временный файл PDF после экспорта.")
+    if leftover_staged is not None:
+        warnings.append("Не удалось удалить конфиденциальный staged PDF; удалите его вручную.")
     assert marked
-    return ExportedDocument(kind, target, document["id"], document["number"],
-                            document["document_date"], " ".join(warnings) or None, leftover)
+    return ExportedDocument(
+        kind, target, document["id"], document["number"],
+        document["document_date"], " ".join(warnings) or None,
+        leftover_backup, leftover_staged,
+    )
 
 
 def export_documents(service: CalculationService, calculation_id: int,

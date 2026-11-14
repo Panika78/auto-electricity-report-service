@@ -351,20 +351,24 @@ class ReviewExportRegressionTests(unittest.TestCase):
     def test_failed_restore_keeps_private_backup_and_original_cause(self):
         self.target.write_bytes(b"Previous valid PDF")
         self.service.fail_mark = True
-        replace = __import__("os").replace
+        from app.documents import export as exp
+        publish = exp._publish_new_file
 
         def fail_only_restore(source, destination):
             if Path(source).name.startswith(".kontakt-backup-"):
                 raise PermissionError("restore denied")
-            return replace(source, destination)
+            return publish(source, destination)
 
-        with patch("app.documents.export.os.replace", side_effect=fail_only_restore):
+        with patch("app.documents.export._publish_new_file", side_effect=fail_only_restore):
             with self.assertRaises(ExportError) as ctx:
                 export_document(self.service, 5, "act", self.target, overwrite=True)
         err = ctx.exception
         self.assertTrue(err.recovery_failed)
         self.assertIsInstance(err.__cause__, ValueError)
-        self.assertIsInstance(err.recovery_error, PermissionError)
+        self.assertIsInstance(err.recovery_error, OSError)
+        self.assertIsInstance(err.recovery_error.__cause__, PermissionError)
+        self.assertIsNotNone(err.quarantine_path)
+        self.assertTrue(err.quarantine_path.exists())
         self.assertIsNotNone(err.backup_path)
         self.assertTrue(err.backup_path.exists())
         self.assertEqual(err.backup_path.read_bytes(), b"Previous valid PDF")
@@ -373,6 +377,7 @@ class ReviewExportRegressionTests(unittest.TestCase):
         self.assertEqual(err.path, self.target)
         # Explicit cleanup in a test with entirely synthetic bytes.
         err.backup_path.unlink()
+        err.quarantine_path.unlink()
 
     def test_successful_restore_consumes_backup_and_preserves_prior_file(self):
         self.target.write_bytes(b"Prior file")
@@ -448,6 +453,7 @@ class ReviewExportRegressionTests(unittest.TestCase):
         self.assertTrue(err.recovery_failed)
         self.assertIsInstance(err.cleanup_error, PermissionError)
         self.assertEqual(err.path, self.target)
+        self.assertEqual(err.partial_path, self.target)
         self.assertEqual(self.target.read_bytes(), b"incomplete")
         self.assertFalse(self.service.marked)
         self.target.unlink()
@@ -540,6 +546,305 @@ class ReviewExportRegressionTests(unittest.TestCase):
             self.assertFalse(self.service.reserved)
         finally:
             junction.rmdir()
+
+
+
+class SecondReviewExportRegressionTests(unittest.TestCase):
+    """R-08/R-09 reproduce publication failures using synthetic bytes only."""
+
+    def setUp(self):
+        ExportTests.setUp(self)
+
+    def test_r08_identity_failure_after_publication_keeps_backup(self):
+        from app.documents import export as exp
+        self.target.write_bytes(b"OLD")
+        real_identity = exp._identity
+
+        def stat_failure(path):
+            if Path(path) == self.target and self.target.read_bytes().startswith(b"%PDF-"):
+                raise PermissionError("simulated stat failure after publish")
+            return real_identity(path)
+
+        with patch.object(exp, "_identity", side_effect=stat_failure):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True)
+        err = ctx.exception
+        self.assertTrue(err.recovery_failed)
+        self.assertIsInstance(err.__cause__, PermissionError)
+        self.assertIsNotNone(err.recovery_error)
+        self.assertEqual(err.path, self.target)
+        self.assertIsNotNone(err.backup_path)
+        self.assertEqual(err.backup_path.read_bytes(), b"OLD")
+        self.assertTrue(self.target.read_bytes().startswith(b"%PDF-"))
+        self.assertFalse(self.service.marked)
+
+    def test_r08_foreign_replacement_during_identity_failure_is_untouched(self):
+        import os
+        from app.documents import export as exp
+        self.target.write_bytes(b"OLD")
+        identity = exp._identity
+        foreign = self.target.with_name("foreign.pdf")
+        replaced = False
+
+        def fail_after_external_replacement(path):
+            nonlocal replaced
+            if Path(path) == self.target and not replaced and self.target.read_bytes().startswith(b"%PDF-"):
+                foreign.write_bytes(b"FOREIGN")
+                os.replace(foreign, self.target)
+                replaced = True
+                raise PermissionError("stat failure after a foreign rename")
+            return identity(path)
+
+        with patch.object(exp, "_identity", side_effect=fail_after_external_replacement):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True)
+        self.assertTrue(replaced)
+        self.assertEqual(self.target.read_bytes(), b"FOREIGN")
+        self.assertTrue(ctx.exception.recovery_failed)
+        self.assertEqual(ctx.exception.backup_path.read_bytes(), b"OLD")
+        self.assertFalse(self.service.marked)
+
+    def test_r08_unchanged_target_restores_old_on_mark_conflict(self):
+        self.target.write_bytes(b"OLD")
+        self.service.fail_mark = True
+        with self.assertRaises(ExportError) as ctx:
+            export_document(self.service, 5, "act", self.target, overwrite=True)
+        self.assertIsInstance(ctx.exception.__cause__, ValueError)
+        self.assertFalse(ctx.exception.recovery_failed)
+        self.assertEqual(self.target.read_bytes(), b"OLD")
+        self.assertEqual(list(self.target.parent.glob(".kontakt-backup-*.pdf")), [])
+        self.assertEqual(list(self.target.parent.glob(".kontakt-rollback-*.pdf")), [])
+        self.assertFalse(self.service.marked)
+
+    def test_r08_failed_restore_preserves_backup_and_quarantine(self):
+        from app.documents import export as exp
+        self.target.write_bytes(b"OLD")
+        self.service.fail_mark = True
+        publish = exp._publish_new_file
+
+        def deny_restoring_backup(source, target):
+            if Path(source).name.startswith(".kontakt-backup-"):
+                raise PermissionError("restore denied")
+            return publish(source, target)
+
+        with patch.object(exp, "_publish_new_file", side_effect=deny_restoring_backup):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True)
+        err = ctx.exception
+        self.assertTrue(err.recovery_failed)
+        self.assertIsInstance(err.__cause__, ValueError)
+        self.assertIsInstance(err.recovery_error.__cause__, PermissionError)
+        self.assertEqual(err.backup_path.read_bytes(), b"OLD")
+        self.assertTrue(err.quarantine_path.read_bytes().startswith(b"%PDF-"))
+        self.assertEqual(err.path, self.target)
+        self.assertFalse(self.service.marked)
+
+    def test_r08_external_rename_between_check_and_quarantine_is_preserved(self):
+        import os
+        from app.documents import export as exp
+        self.target.write_bytes(b"OLD")
+        self.service.fail_mark = True
+        foreign = self.target.with_name("external.pdf")
+        original_replace = os.replace
+        raced = False
+
+        def replace_at_quarantine(source, destination):
+            nonlocal raced
+            if Path(source) == self.target and Path(destination).name.startswith(".kontakt-rollback-") and not raced:
+                foreign.write_bytes(b"FOREIGN")
+                original_replace(foreign, self.target)
+                raced = True
+            return original_replace(source, destination)
+
+        with patch.object(exp.os, "replace", side_effect=replace_at_quarantine):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True)
+        self.assertTrue(raced)
+        self.assertTrue(ctx.exception.recovery_failed)
+        self.assertEqual(self.target.read_bytes(), b"FOREIGN")
+        self.assertEqual(ctx.exception.backup_path.read_bytes(), b"OLD")
+        self.assertFalse(self.service.marked)
+
+    def test_r08_foreign_creator_during_restore_cannot_be_overwritten(self):
+        from app.documents import export as exp
+        self.target.write_bytes(b"OLD")
+        self.service.fail_mark = True
+        publish = exp._publish_new_file
+
+        def create_foreign_before_restore(source, target):
+            if Path(source).name.startswith(".kontakt-backup-"):
+                Path(target).write_bytes(b"FOREIGN")
+            return publish(source, target)
+
+        with patch.object(exp, "_publish_new_file", side_effect=create_foreign_before_restore):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True)
+        err = ctx.exception
+        self.assertTrue(err.recovery_failed)
+        self.assertEqual(self.target.read_bytes(), b"FOREIGN")
+        self.assertEqual(err.backup_path.read_bytes(), b"OLD")
+        self.assertIsNotNone(err.quarantine_path)
+        self.assertTrue(err.quarantine_path.read_bytes().startswith(b"%PDF-"))
+        self.assertFalse(self.service.marked)
+
+    def test_r08_no_prior_pdf_keeps_new_file_when_identity_unknown(self):
+        from app.documents import export as exp
+        identity = exp._identity
+
+        def fail_published_target(path):
+            if Path(path) == self.target and self.target.exists():
+                raise PermissionError("identity unavailable")
+            return identity(path)
+
+        with patch.object(exp, "_identity", side_effect=fail_published_target):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target)
+        self.assertTrue(self.target.read_bytes().startswith(b"%PDF-"))
+        self.assertTrue(ctx.exception.recovery_failed)
+        self.assertEqual(ctx.exception.path, self.target)
+        self.assertIsNone(ctx.exception.backup_path)
+        self.assertFalse(self.service.marked)
+
+    def test_r09_successful_export_reports_leftover_staged_file(self):
+        unlink = Path.unlink
+
+        def deny_staged(self, *args, **kwargs):
+            if self.name.startswith(".kontakt-pdf-"):
+                raise PermissionError("stage cleanup denied")
+            return unlink(self, *args, **kwargs)
+
+        with patch("app.documents.export.Path.unlink", new=deny_staged):
+            result = export_document(self.service, 5, "act", self.target)
+        self.assertEqual(self.service.marked, [1])
+        self.assertIsNotNone(result.cleanup_warning)
+        self.assertIsNotNone(result.leftover_staged)
+        self.assertEqual(result.leftover_staged.parent, self.target.parent)
+        self.assertTrue(result.leftover_staged.name.startswith(".kontakt-pdf-"))
+        self.assertEqual(result.leftover_staged.read_bytes(), self.target.read_bytes())
+
+    def test_r09_successful_backup_cleanup_reports_exact_path(self):
+        self.target.write_bytes(b"OLD")
+        unlink = Path.unlink
+
+        def deny_backup(self, *args, **kwargs):
+            if self.name.startswith(".kontakt-backup-"):
+                raise PermissionError("backup cleanup denied")
+            return unlink(self, *args, **kwargs)
+
+        with patch("app.documents.export.Path.unlink", new=deny_backup):
+            result = export_document(self.service, 5, "act", self.target, overwrite=True)
+        self.assertTrue(self.target.read_bytes().startswith(b"%PDF-"))
+        self.assertEqual(self.service.marked, [1])
+        self.assertIsNotNone(result.cleanup_warning)
+        self.assertEqual(result.leftover_backup.read_bytes(), b"OLD")
+        self.assertIsNone(result.leftover_staged)
+
+    def test_r09_publish_error_and_staged_cleanup_error_keep_both_causes(self):
+        import errno
+        unlink = Path.unlink
+
+        def deny_stage(self, *args, **kwargs):
+            if self.name.startswith(".kontakt-pdf-"):
+                raise PermissionError("stage cleanup denied")
+            return unlink(self, *args, **kwargs)
+
+        with patch("app.documents.export.os.link", side_effect=OSError(errno.EACCES, "publish denied")), \
+             patch("app.documents.export.Path.unlink", new=deny_stage):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target)
+        err = ctx.exception
+        self.assertIsInstance(err.__cause__, OSError)
+        self.assertEqual(err.__cause__.errno, errno.EACCES)
+        self.assertIsInstance(err.cleanup_error, PermissionError)
+        self.assertEqual(err.staged_path.parent, self.target.parent)
+        self.assertTrue(err.staged_path.read_bytes().startswith(b"%PDF-"))
+        self.assertFalse(self.target.exists())
+        self.assertFalse(self.service.marked)
+
+    def test_r09_failed_stage_write_and_cleanup_reports_file(self):
+        import errno
+        unlink = Path.unlink
+
+        def deny_stage(self, *args, **kwargs):
+            if self.name.startswith(".kontakt-pdf-"):
+                raise PermissionError("stage cleanup denied")
+            return unlink(self, *args, **kwargs)
+
+        with patch("app.documents.export.os.fsync", side_effect=OSError(errno.ENOSPC, "disk full")), \
+             patch("app.documents.export.Path.unlink", new=deny_stage):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target)
+        err = ctx.exception
+        self.assertEqual(err.__cause__.errno, errno.ENOSPC)
+        self.assertIsInstance(err.cleanup_error, PermissionError)
+        self.assertTrue(err.staged_path.exists())
+        self.assertFalse(self.target.exists())
+        self.assertFalse(self.service.marked)
+
+    def test_r09_failed_backup_write_and_cleanup_reports_file(self):
+        import errno
+        self.target.write_bytes(b"OLD")
+        unlink = Path.unlink
+
+        def partial_backup(source, destination, **kwargs):
+            destination.write(b"partial-backup")
+            raise OSError(errno.ENOSPC, "disk full")
+
+        def deny_backup(self, *args, **kwargs):
+            if self.name.startswith(".kontakt-backup-"):
+                raise PermissionError("backup cleanup denied")
+            return unlink(self, *args, **kwargs)
+
+        with patch("app.documents.export.shutil.copyfileobj", side_effect=partial_backup), \
+             patch("app.documents.export.Path.unlink", new=deny_backup):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True)
+        err = ctx.exception
+        self.assertEqual(err.__cause__.errno, errno.ENOSPC)
+        self.assertIsInstance(err.cleanup_error, PermissionError)
+        self.assertEqual(err.backup_path.read_bytes(), b"partial-backup")
+        self.assertEqual(self.target.read_bytes(), b"OLD")
+        self.assertFalse(self.service.marked)
+
+    def test_r09_interrupt_with_cleanup_failure_keeps_paths_and_original(self):
+        unlink = Path.unlink
+
+        def deny_stage(self, *args, **kwargs):
+            if self.name.startswith(".kontakt-pdf-"):
+                raise PermissionError("stage cleanup denied")
+            return unlink(self, *args, **kwargs)
+
+        def interrupt(*args, **kwargs):
+            raise KeyboardInterrupt("controlled interruption")
+
+        with patch("app.documents.export.Path.unlink", new=deny_stage), \
+             patch.object(self.service, "mark_document_generated", side_effect=interrupt):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target)
+        err = ctx.exception
+        self.assertIsInstance(err.__cause__, KeyboardInterrupt)
+        self.assertIsNotNone(err.staged_path)
+        self.assertTrue(err.staged_path.exists())
+        self.assertFalse(self.target.exists())
+        self.assertFalse(self.service.marked)
+
+    def test_r09_replaced_staged_file_is_not_unlinked(self):
+        from app.documents import export as exp
+        real_publish = exp._publish_new_file
+
+        def replace_stage_before_cleanup(staged, target):
+            Path(staged).unlink()
+            Path(staged).write_bytes(b"FOREIGN-STAGED")
+            raise PermissionError("publication failed")
+
+        with patch.object(exp, "_publish_new_file", side_effect=replace_stage_before_cleanup):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target)
+        err = ctx.exception
+        self.assertIsInstance(err.__cause__, PermissionError)
+        self.assertEqual(err.staged_path.read_bytes(), b"FOREIGN-STAGED")
+        self.assertFalse(self.target.exists())
+        self.assertFalse(self.service.marked)
 
 
 class ReviewRenderRegressionTests(unittest.TestCase):
