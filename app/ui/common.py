@@ -113,7 +113,7 @@ def apply_appearance() -> None:
         f'{{font-size:{round(nominal * scale)}px; font-weight:{heading_weight}; color:#1b2b30;}}'
         for nominal in (19, 20, 27)
     ]
-    app.setStyleSheet("\\n".join(rules))
+    app.setStyleSheet("\n".join(rules))
 
 
 def image_directory() -> Path:
