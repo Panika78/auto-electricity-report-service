@@ -105,12 +105,15 @@ def apply_appearance() -> None:
     QApplication.instance().setFont(font)
     scale = {"compact": .93, "standard": 1, "large": 1.16}.get(size, 1)
     heading_weight = {"light": 530, "normal": 700, "bold": 850}.get(weight, 700)
-    for widget in QApplication.instance().allWidgets():
-        nominal = widget.property("kontaktHeadingSize")
-        if nominal:
-            widget.setStyleSheet(
-                f"font-size:{round(int(nominal) * scale)}px; font-weight:{heading_weight}; color:#1b2b30;"
-            )
+    # App-wide stylesheet is inherited by future dialogs too. Avoid retaining or
+    # restyling ephemeral PySide wrappers from QApplication.allWidgets().
+    app = QApplication.instance()
+    rules = [
+        f'QLabel[kontaktHeadingSize="{nominal}"] '
+        f'{{font-size:{round(nominal * scale)}px; font-weight:{heading_weight}; color:#1b2b30;}}'
+        for nominal in (19, 20, 27)
+    ]
+    app.setStyleSheet("\\n".join(rules))
 
 
 def image_directory() -> Path:
