@@ -450,6 +450,12 @@ class CalculationDialog(QDialog):
         self.status.setText("Расчёт создан и сохранён. Дальнейшие изменения сохраняются автоматически.")
 
     def _refresh(self) -> None:
+        # A different field may have been entered but not yet committed
+        # (including temporarily inconsistent dates). Never overwrite it.
+        unsaved = set(self.pending)
+        unsaved_start = self.start_edit.text()
+        unsaved_end = self.end_edit.text()
+        unsaved_dates = (self.date_start.date(), self.date_end.date())
         self._filling = True
         self.create_button.setVisible(self.calculation_id is None)
         self.delete_button.setVisible(self.calculation_id is not None)
@@ -481,6 +487,19 @@ class CalculationDialog(QDialog):
             tariff = queries.month_tariff(conn, self.year, self.month)
         self.tariff_label.setText(show_number(tariff["rate"]) if tariff else "Не установлен")
         self._filling = False
+        if self.calculation_id is not None and unsaved:
+            self._filling = True
+            if "start_reading" in unsaved:
+                self.start_edit.setText(unsaved_start)
+            if "end_reading" in unsaved:
+                self.end_edit.setText(unsaved_end)
+            if "period" in unsaved:
+                self.date_start.setDate(unsaved_dates[0])
+                self.date_end.setDate(unsaved_dates[1])
+            self._filling = False
+            self.status.setText(
+                self.status.text() + "\\nЕсть несохранённые изменения: " + ", ".join(sorted(unsaved))
+            )
 
     def _save_reading(self, key: str) -> None:
         if self.calculation_id is None or self._filling or key not in self.pending:
@@ -494,6 +513,7 @@ class CalculationDialog(QDialog):
         current = self.service.get_calculation(self.calculation_id)
         if current[key] == value and (key != "start_reading" or current["start_reading_source"] == "manual"):
             self.pending.discard(key)
+            self._refresh()
             return
         result = run_confirmed(self, lambda flags: self.service.update_calculation(
             self.calculation_id, **{key: value}, **flags))
@@ -531,6 +551,9 @@ class CalculationDialog(QDialog):
             self._refresh()
 
     def _manual(self, field: str, label: str, places: int) -> None:
+        if self.pending:
+            QMessageBox.warning(self, label, "Сначала сохраните или исправьте незавершённые поля.")
+            return
         if self.calculation_id is None:
             QMessageBox.information(self, label, "Сначала создайте расчёт.")
             return
@@ -559,6 +582,9 @@ class CalculationDialog(QDialog):
         self._manual("total_amount", "Ручная сумма", 2)
 
     def _export(self) -> None:
+        if self.pending:
+            QMessageBox.warning(self, "PDF", "Есть несохранённые изменения. Исправьте их перед выгрузкой.")
+            return
         if self.calculation_id is None:
             QMessageBox.information(self, "PDF", "Сначала создайте расчёт.")
             return
@@ -601,6 +627,7 @@ class SettingsPage(QWidget):
         super().__init__(parent)
         self.service = service
         self._filling = False
+        self.pending: set[str] = set()
         self.setObjectName("workspace")
         outer = QVBoxLayout(self)
         heading = QLabel("Настройки")
@@ -616,6 +643,7 @@ class SettingsPage(QWidget):
         for key, label in SETTINGS_FIELDS:
             field = _line()
             field.editingFinished.connect(lambda name=key: self._save_field(name))
+            field.textEdited.connect(lambda _text, name=key: self.pending.add(name))
             self.fields[key] = field
             form.addRow(label, field)
         self.reuse = QCheckBox("Использовать ручные начальные показания прошлого месяца")
@@ -668,7 +696,8 @@ class SettingsPage(QWidget):
             record = db.get_settings(conn)
         self._filling = True
         for key, field in self.fields.items():
-            field.setText(record[key] or "")
+            if key not in self.pending:
+                field.setText(record[key] or "")
         self.reuse.setChecked(bool(record["reuse_manual_start_readings"]))
         for key, (label, remove) in self.images.items():
             path = record[key]
@@ -689,10 +718,12 @@ class SettingsPage(QWidget):
         with self.service.database.connection() as conn:
             previous = db.get_settings(conn)[key]
         if previous == value:
+            self.pending.discard(key)
             return
         result = run_confirmed(self, lambda _flags: self.service.update_settings(
             **{key: value}))
         if result is not CANCELLED:
+            self.pending.discard(key)
             self.note.setText("Реквизиты сохранены. Ранее сформированные документы требуют обновления.")
         else:
             self.note.setText("Поле не сохранено. Исправьте ошибку перед уходом со страницы.")
@@ -819,6 +850,12 @@ class ExportDialog(QDialog):
             QMessageBox.warning(self, "Нет документов", "Выберите акт, счёт или оба документа.")
             return
         checked = self.service.validate(self.calculation_id)
+        with self.database.connection() as conn:
+            performer = db.get_settings(conn)
+        if not performer["performer_name"].strip():
+            QMessageBox.warning(self, "Не заполнен исполнитель",
+                                "Укажите название исполнителя в разделе «Настройки» перед PDF.")
+            return
         if not checked.ready:
             QMessageBox.warning(self, "Расчёт не готов", "\n".join(checked.errors))
             return
