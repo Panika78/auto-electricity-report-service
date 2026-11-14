@@ -498,7 +498,7 @@ class CalculationDialog(QDialog):
                 self.date_end.setDate(unsaved_dates[1])
             self._filling = False
             self.status.setText(
-                "self.status.text() + "\nЕсть несохранённые изменения: " + ", ".join(sorted(unsaved))
+                self.status.text() + "\nЕсть несохранённые изменения: " + ", ".join(sorted(unsaved))
             )
 
     def _save_reading(self, key: str) -> None:
