@@ -103,6 +103,14 @@ def apply_appearance() -> None:
                     "normal": QFont.Weight.Normal,
                     "bold": QFont.Weight.DemiBold}.get(weight, QFont.Weight.Normal))
     QApplication.instance().setFont(font)
+    scale = {"compact": .93, "standard": 1, "large": 1.16}.get(size, 1)
+    heading_weight = {"light": 530, "normal": 700, "bold": 850}.get(weight, 700)
+    for widget in QApplication.instance().allWidgets():
+        nominal = widget.property("kontaktHeadingSize")
+        if nominal:
+            widget.setStyleSheet(
+                f"font-size:{round(int(nominal) * scale)}px; font-weight:{heading_weight}; color:#1b2b30;"
+            )
 
 
 def image_directory() -> Path:
