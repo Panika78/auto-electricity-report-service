@@ -127,3 +127,26 @@ python -m compileall -q app tests
 ```
 
 Экран ввода, формирование PDF и ZIP не относятся к issue #2.
+
+
+## PDF-документы (Issue #3)
+
+Подсистема `app.documents` формирует акт и счёт на оплату через ReportLab. Макеты различаются и воспроизводят структуру исходных Word/Excel-документов; реальные эталоны, реквизиты и изображения не хранятся в репозитории.
+
+```python
+from app.documents import export_document, export_documents, safe_filename
+
+# service = CalculationService(database), calculation_id — существующий готовый расчёт.
+result = export_document(service, calculation_id, "act", "act.pdf", confirm_zero=False)
+# Для двух документов передайте словарь путей:
+results = export_documents(service, calculation_id, {"act": "act.pdf", "invoice": "invoice.pdf"})
+# Перезапись существующего PDF — только с overwrite=True.
+```
+
+При необходимости пользователь подтверждает нулевой расход через `confirm_zero=True`, а дубликат номера — через `confirm_duplicate=True`. Номер и дату можно установить через `number=` и `document_date=` в `export_document`. Отмена до начала сохранения — `cancelled=True`. `ExportBatchResult.successful` и `failed` отражают результат каждого документа независимо.
+
+Генераторы `render_act(snapshot)` и `render_invoice(snapshot)` не обращаются к SQLite или Qt, не пересчитывают суммы и возвращают байты PDF. Сервис резервирует номер и создаёт согласованный снимок данных, а статус «сформирован» устанавливает только после успешного сохранения файла и проверки ревизии. При сбое обновления статуса экспорт пытается восстановить предыдущий файл; в исключении `ExportError.recovery_failed` фиксируется ситуация, когда восстановление не удалось. Полной транзакционности между файловой системой и SQLite нет.
+
+Кириллические PT Serif/PT Sans шрифты лицензированы по SIL OFL 1.1 и находятся в `app/documents/fonts/`, чтобы входить в wheel и будущую Windows-сборку без системных шрифтов. Пользовательские изображения подписи/печати остаются в пользовательском хранилище и не включаются в пакет. В PyInstaller-сборке необходимо сохранить директорию `app/documents/fonts` как package data.
+
+Проверка: `python -m pip install -e ".[test]"`, затем `QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v`. Диалоги выбора пути и подтверждений относятся к #4, ZIP — к #5.
