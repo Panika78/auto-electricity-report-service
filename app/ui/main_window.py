@@ -223,7 +223,7 @@ class MainWindow(QMainWindow):
         self.calc_table.doubleClicked.connect(lambda _index: self.open_selected_calculation())
         contents.addWidget(self.calc_table, 1)
         bulk = QHBoxLayout()
-        self.bulk_action = button("Массовая ZIP-выгрузка", self.export_bulk)
+        self.bulk_action = QPushButton("Массовая ZIP-выгрузка")
         self.bulk_action.setEnabled(False)
         self.bulk_action.setToolTip("Доступно после реализации движка массового экспорта в issue #5")
         bulk.addWidget(self.bulk_action)
@@ -427,10 +427,6 @@ class MainWindow(QMainWindow):
         if calc_id is not None:
             ExportDialog(self.service, self.database, calc_id, self).exec()
             self.refresh_calculations()
-
-    def export_bulk(self) -> None:
-        # Wired only by issue #5 after a genuine ZIP service is available.
-        return
 
     def new_tenant(self) -> None:
         if TenantDialog(self.service, self.database, parent=self).exec():
