@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import calendar
-from decimal import Decimal
+import sqlite3
+from functools import wraps
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QColor
@@ -13,9 +14,10 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.service import CalculationService
+from app.core.validation import validate_calculation
 from app.data import database as db
 from app.data import queries
-from app.ui.common import CANCELLED, apply_appearance, parse_number, run_confirmed, show_number
+from app.ui.common import CANCELLED, apply_appearance, parse_number, run_confirmed, show_error, show_number
 from app.ui.forms import CalculationDialog, ExportDialog, SettingsPage, TenantDialog
 
 
@@ -91,6 +93,25 @@ def item(value, *, tooltip: str = "", kind: str = "") -> QTableWidgetItem:
     return result
 
 
+def database_error_dialog(operation):
+    """No SQLite exceptions may escape Qt read slots or display stale rows."""
+    @wraps(operation)
+    def protected(self, *args, **kwargs):
+        try:
+            return operation(self, *args, **kwargs)
+        except (sqlite3.Error, OSError) as error:
+            if operation.__name__ == "refresh_calculations":
+                self.calc_table.setRowCount(0)
+                self.summary.setText("Расчёты не загружены — ошибка доступа к базе данных.")
+            elif operation.__name__ == "refresh_tenants":
+                (self.archive_table if kwargs.get("archived", args[0] if args else False)
+                 else self.tenant_table).setRowCount(0)
+            self.statusBar().showMessage("Ошибка доступа к базе данных — данные не обновлены.")
+            show_error(self, error, "Ошибка доступа к базе данных")
+            return None
+    return protected
+
+
 class MainWindow(QMainWindow):
     def __init__(self, database: db.Database | None = None) -> None:
         super().__init__()
@@ -100,7 +121,7 @@ class MainWindow(QMainWindow):
         self.service = CalculationService(self.database)
         previous = QDate.currentDate().addMonths(-1)
         self.year, self.month = previous.year(), previous.month()
-        self.setWindowTitle("Контакт — учёт электроэнергии")
+        self.setWindowTitle("контакт — учёт электроэнергии")
         self.resize(1360, 820)
         self.setMinimumSize(790, 540)
         self.setStyleSheet(THEME)
@@ -208,14 +229,15 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         self.calc_search = QLineEdit()
         self.calc_search.setPlaceholderText("Поиск арендатора или ID…")
-        self.calc_search.textChanged.connect(self.refresh_calculations)
+        self.calc_search.textChanged.connect(lambda _text: self.refresh_calculations())
         controls.addWidget(self.calc_search, 1)
         self.calc_filter = QComboBox()
         self.calc_filter.addItems(["Все расчёты", "Готовые", "Не готовы", "Документы не сформированы",
                                    "Требуют обновления", "Все документы сформированы"])
-        self.calc_filter.currentIndexChanged.connect(self.refresh_calculations)
+        self.calc_filter.currentIndexChanged.connect(lambda _index: self.refresh_calculations())
         controls.addWidget(self.calc_filter)
-        controls.addWidget(button("Карточка", self.open_selected_calculation))
+        controls.addWidget(button("Расчёт", self.open_selected_calculation))
+        controls.addWidget(button("Арендатор / история", self.open_tenant_for_selected_calculation))
         controls.addWidget(button("PDF", self.export_selected_calculation))
         contents.addLayout(controls)
         self.calc_table = table(["ID", "Арендатор", "Период", "Начало", "Конец",
@@ -297,6 +319,7 @@ class MainWindow(QMainWindow):
         self.refresh_tenants(False)
         self.refresh_tenants(True)
 
+    @database_error_dialog
     def save_tariff(self) -> None:
         with self.database.connection() as conn:
             record = queries.month_tariff(conn, self.year, self.month)
@@ -307,7 +330,6 @@ class MainWindow(QMainWindow):
         try:
             rate = parse_number(text, 4)
         except (ValueError, TypeError) as error:
-            from app.ui.common import show_error
             show_error(self, error, "Некорректный тариф")
             self.tariff_input.setText(previous)
             return
@@ -317,6 +339,7 @@ class MainWindow(QMainWindow):
             self.tariff_input.setText(previous)
         self.refresh_calculations()
 
+    @database_error_dialog
     def refresh_calculations(self) -> None:
         with self.database.connection() as conn:
             calculations = db.list_calculations(conn, year=self.year, month=self.month)
@@ -335,7 +358,7 @@ class MainWindow(QMainWindow):
         for calc in calculations:
             tenant = tenants.get(calc["tenant_id"], {})
             name = tenant.get("name", f"ID {calc['tenant_id']}")
-            checked = self.service.validate(calc["id"])
+            checked = validate_calculation(calc, tariff["rate"] if tariff else None)
             act = docs.get((calc["id"], "act"))
             invoice = docs.get((calc["id"], "invoice"))
             def doc_label(doc):
@@ -381,6 +404,7 @@ class MainWindow(QMainWindow):
             f"тариф: {show_number(tariff['rate']) if tariff else 'не задан'}")
         self.calc_table.resizeRowsToContents()
 
+    @database_error_dialog
     def refresh_tenants(self, archived: bool = False) -> None:
         listing = self.archive_table if archived else self.tenant_table
         search = self.archive_search if archived else self.tenant_search
@@ -421,6 +445,17 @@ class MainWindow(QMainWindow):
             dlg = CalculationDialog(self.service, self.database, calculation_id=calc_id, parent=self)
             dlg.exec()
             self._refresh_all()
+
+    @database_error_dialog
+    def open_tenant_for_selected_calculation(self) -> None:
+        calculation_id = self.selected_id(self.calc_table)
+        if calculation_id is None:
+            return
+        calc = self.service.get_calculation(calculation_id)
+        tenant_dialog = TenantDialog(
+            self.service, self.database, tenant_id=calc["tenant_id"], parent=self)
+        tenant_dialog.exec()
+        self._refresh_all()
 
     def export_selected_calculation(self) -> None:
         calc_id = self.selected_id(self.calc_table)
