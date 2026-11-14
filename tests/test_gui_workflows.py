@@ -594,10 +594,13 @@ class NativeWorkflowTests(unittest.TestCase):
         calc = self.service.create_calculation(
             tenant["id"], 2026, 10, start_reading="10", end_reading="20")
         dialog = CalculationDialog(self.service, self.database, calculation_id=calc["id"])
-        dialog.date_end.setDate(QDate(2026, 10, 27))
         with mock.patch.object(self.database, "connection",
                                side_effect=sqlite3.OperationalError("database is locked")), \
              mock.patch.object(QMessageBox, "critical") as critical:
+            # QDateEdit may autosave on setDate(): inject the failure BEFORE
+            # changing the widget, not after the date already reached SQLite.
+            dialog.date_end.setDate(QDate(2026, 10, 27))
+            critical.reset_mock()
             dialog._save_period()
             critical.assert_called_once()
             self.assertIn("period", dialog.pending)
