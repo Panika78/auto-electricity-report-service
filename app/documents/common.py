@@ -120,7 +120,7 @@ class Signature(Flowable):
         super().__init__()
         self.label = label
         self.width = width
-        self.height = 46
+        self.height = 64
         self.signature_path = signature_path
         self.stamp_path = stamp_path
         self.font = font
@@ -130,14 +130,14 @@ class Signature(Flowable):
         c = self.canv
         c.setFillColor(colors.black)
         c.setFont(self.font, self.size)
-        c.drawString(0, 8, self.label)
+        c.drawString(0, 15, self.label)
         x = pdfmetrics.stringWidth(self.label, self.font, self.size) + 5
         c.setLineWidth(0.65)
-        c.line(x, 7, self.width - 4, 7)
+        c.line(x, 14, self.width - 4, 14)
         if self.signature_path:
-            self._draw_image(self.signature_path, x + 10, 2, self.width - x - 23, 35)
+            self._draw_image(self.signature_path, x + 10, 13, self.width - x - 23, 35)
         if self.stamp_path:
-            self._draw_image(self.stamp_path, x + 12, -8, min(92, self.width - x - 15), 50)
+            self._draw_image(self.stamp_path, x + 12, 8, min(92, self.width - x - 15), 50)
 
     def _draw_image(self, path: str, x: float, y: float, max_width: float,
                     max_height: float) -> None:

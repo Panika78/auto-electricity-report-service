@@ -210,7 +210,8 @@ class ExportTests(unittest.TestCase):
         self.assertFalse(self.service.marked)
 
     def test_failed_new_file_link_leaves_no_partial_file(self):
-        with patch("app.documents.export.os.link", side_effect=PermissionError("blocked")):
+        import errno
+        with patch("app.documents.export.os.link", side_effect=OSError(errno.EACCES, "blocked")):
             with self.assertRaises(ExportError):
                 export_document(self.service, 5, "act", self.target)
         self.assertFalse(self.target.exists())
@@ -339,6 +340,386 @@ class RealServiceIntegrationTests(unittest.TestCase):
             export_document(self.service, zero["id"], "invoice", self.path("zero"))
         export_document(self.service, zero["id"], "invoice", self.path("zero"), confirm_zero=True)
         self.assertIn("Ноль рублей", text_of(self.path("zero").read_bytes()))
+
+
+class ReviewExportRegressionTests(unittest.TestCase):
+    """Fault injections exercise the real publication/rollback machinery."""
+
+    def setUp(self):
+        ExportTests.setUp(self)
+
+    def test_failed_restore_keeps_private_backup_and_original_cause(self):
+        self.target.write_bytes(b"Previous valid PDF")
+        self.service.fail_mark = True
+        replace = __import__("os").replace
+
+        def fail_only_restore(source, destination):
+            if Path(source).name.startswith(".kontakt-backup-"):
+                raise PermissionError("restore denied")
+            return replace(source, destination)
+
+        with patch("app.documents.export.os.replace", side_effect=fail_only_restore):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True)
+        err = ctx.exception
+        self.assertTrue(err.recovery_failed)
+        self.assertIsInstance(err.__cause__, ValueError)
+        self.assertIsInstance(err.recovery_error, PermissionError)
+        self.assertIsNotNone(err.backup_path)
+        self.assertTrue(err.backup_path.exists())
+        self.assertEqual(err.backup_path.read_bytes(), b"Previous valid PDF")
+        self.assertEqual(self.service.marked, [])
+        self.assertIn("резервная копия", str(err))
+        self.assertEqual(err.path, self.target)
+        # Explicit cleanup in a test with entirely synthetic bytes.
+        err.backup_path.unlink()
+
+    def test_successful_restore_consumes_backup_and_preserves_prior_file(self):
+        self.target.write_bytes(b"Prior file")
+        self.service.fail_mark = True
+        with self.assertRaises(ExportError) as ctx:
+            export_document(self.service, 5, "act", self.target, overwrite=True)
+        self.assertFalse(ctx.exception.recovery_failed)
+        self.assertEqual(self.target.read_bytes(), b"Prior file")
+        self.assertEqual(list(self.target.parent.glob(".kontakt-backup-*.pdf")), [])
+        self.assertEqual(self.service.marked, [])
+
+    def test_backup_cleanup_failure_is_success_with_diagnostic(self):
+        self.target.write_bytes(b"old")
+        unlink = Path.unlink
+
+        def deny_backup_unlink(self, *args, **kwargs):
+            if self.name.startswith(".kontakt-backup-"):
+                raise PermissionError("backup cleanup denied")
+            return unlink(self, *args, **kwargs)
+
+        with patch("app.documents.export.Path.unlink", new=deny_backup_unlink):
+            published = export_document(self.service, 5, "act", self.target, overwrite=True)
+        self.assertEqual(self.service.marked, [1])
+        self.assertTrue(self.target.read_bytes().startswith(b"%PDF-"))
+        self.assertIsNotNone(published.cleanup_warning)
+        self.assertIsNotNone(published.leftover_backup)
+        self.assertTrue(published.leftover_backup.is_file())
+        self.assertEqual(published.leftover_backup.read_bytes(), b"old")
+        published.leftover_backup.unlink()
+
+    def test_unsupported_hardlinks_fall_back_to_exclusive_creation(self):
+        import errno
+        with patch("app.documents.export.os.link", side_effect=OSError(errno.EOPNOTSUPP, "no hardlink")):
+            result = export_document(self.service, 5, "act", self.target)
+        self.assertEqual(result.path, self.target)
+        self.assertTrue(self.target.read_bytes().startswith(b"%PDF-"))
+        self.assertEqual(self.service.marked, [1])
+
+    def test_exclusive_fallback_write_failure_removes_only_partial_file(self):
+        import errno
+
+        def partial_copy(source, dest, **kwargs):
+            dest.write(b"incomplete")
+            raise OSError(errno.ENOSPC, "disk full")
+
+        with patch("app.documents.export.os.link", side_effect=OSError(errno.EOPNOTSUPP, "no hardlink")), \
+             patch("app.documents.export.shutil.copyfileobj", side_effect=partial_copy):
+            with self.assertRaises(ExportError):
+                export_document(self.service, 5, "act", self.target)
+        self.assertFalse(self.target.exists())
+        self.assertFalse(self.service.marked)
+
+    def test_exclusive_fallback_reports_unremovable_partial_file(self):
+        import errno
+        unlink = Path.unlink
+
+        def deny_partial_delete(self, *args, **kwargs):
+            if self == self_target:
+                raise PermissionError("partial cleanup denied")
+            return unlink(self, *args, **kwargs)
+
+        def partial_copy(source, dest, **kwargs):
+            dest.write(b"incomplete")
+            raise OSError(errno.ENOSPC, "disk full")
+
+        self_target = self.target
+        with patch("app.documents.export.os.link", side_effect=OSError(errno.EOPNOTSUPP, "no hardlink")), \
+             patch("app.documents.export.shutil.copyfileobj", side_effect=partial_copy), \
+             patch("app.documents.export.Path.unlink", new=deny_partial_delete):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target)
+        err = ctx.exception
+        self.assertTrue(err.recovery_failed)
+        self.assertIsInstance(err.cleanup_error, PermissionError)
+        self.assertEqual(err.path, self.target)
+        self.assertEqual(self.target.read_bytes(), b"incomplete")
+        self.assertFalse(self.service.marked)
+        self.target.unlink()
+
+    def test_racing_new_file_is_never_overwritten(self):
+        link = __import__("os").link
+
+        def other_writer(source, dest, *args, **kwargs):
+            Path(dest).write_bytes(b"other owner's PDF")
+            raise FileExistsError("other writer created destination")
+
+        with patch("app.documents.export.os.link", side_effect=other_writer):
+            with self.assertRaises(ExportError):
+                export_document(self.service, 5, "act", self.target)
+        self.assertEqual(self.target.read_bytes(), b"other owner's PDF")
+        self.assertEqual(self.service.marked, [])
+
+    def test_same_destination_via_relative_and_dot_dot_paths(self):
+        other = self.target.parent / "sub"
+        other.mkdir()
+        alias = other / ".." / "act.pdf"
+        with self.assertRaises(ValueError):
+            export_documents(self.service, 5, {"act": self.target, "invoice": alias})
+        self.assertFalse(self.service.reserved)
+
+    def test_symlinked_directory_alias_is_rejected_before_any_publication(self):
+        alias = self.target.parent / "alias"
+        try:
+            alias.symlink_to(self.target.parent, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"Cannot create directory symlink: {exc}")
+        with self.assertRaises(ValueError):
+            export_documents(self.service, 5, {"act": self.target, "invoice": alias / "act.pdf"})
+        self.assertFalse(self.target.exists())
+        self.assertFalse(self.service.reserved)
+
+    def test_symlinked_file_alias_is_rejected_before_any_publication(self):
+        self.target.write_bytes(b"valid old")
+        alias = self.target.parent / "alias.pdf"
+        try:
+            alias.symlink_to(self.target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"Cannot create file symlink: {exc}")
+        with self.assertRaises(ValueError):
+            export_documents(self.service, 5, {"act": self.target, "invoice": alias}, overwrite=True)
+        self.assertEqual(self.target.read_bytes(), b"valid old")
+        self.assertFalse(self.service.reserved)
+
+    def test_hardlinks_to_same_existing_file_rejected(self):
+        self.target.write_bytes(b"valid old")
+        alias = self.target.parent / "alias.pdf"
+        try:
+            __import__("os").link(self.target, alias)
+        except OSError as exc:
+            self.skipTest(f"Hard links unsupported here: {exc}")
+        with self.assertRaises(ValueError):
+            export_documents(self.service, 5, {"act": self.target, "invoice": alias}, overwrite=True)
+        self.assertFalse(self.service.reserved)
+
+    def test_case_variants_match_actual_filesystem_rules(self):
+        other = self.target.with_name("ACT.PDF")
+        from app.documents.export import _case_sensitive_directory
+        sensitive = _case_sensitive_directory(self.target.parent)
+        if sensitive:
+            result = export_documents(self.service, 5, {"act": self.target, "invoice": other})
+            self.assertEqual(set(result.successful), {"act", "invoice"})
+            self.assertTrue(self.target.exists())
+            self.assertTrue(other.exists())
+        else:
+            with self.assertRaises(ValueError):
+                export_documents(self.service, 5, {"act": self.target, "invoice": other})
+            self.assertFalse(self.service.reserved)
+
+    def test_distinct_paths_do_not_false_positive(self):
+        other = self.target.with_name("other.pdf")
+        result = export_documents(self.service, 5, {"act": self.target, "invoice": other})
+        self.assertEqual(set(result.successful), {"act", "invoice"})
+
+    @unittest.skipUnless(__import__("os").name == "nt", "junction is a Windows filesystem feature")
+    def test_windows_junction_directory_alias(self):
+        import subprocess
+        junction = self.target.parent / "junction"
+        proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(self.target.parent)],
+                              capture_output=True, text=True)
+        if proc.returncode:
+            self.skipTest("Junction creation unavailable in test environment")
+        try:
+            with self.assertRaises(ValueError):
+                export_documents(self.service, 5, {"act": self.target, "invoice": junction / "act.pdf"})
+            self.assertFalse(self.service.reserved)
+        finally:
+            junction.rmdir()
+
+
+class ReviewRenderRegressionTests(unittest.TestCase):
+    def test_very_long_real_table_cells_split_without_losing_text(self):
+        for kind, renderer, fields in (
+            ("act", render_act, [("tenant", "legal_address"), ("tenant", "additional_agreement")]),
+            ("invoice", render_invoice, [("performer", "bank_name"), ("performer", "account_number")]),
+        ):
+            with self.subTest(kind=kind):
+                data = snapshot(kind)
+                for obj, field in fields:
+                    data[obj][field] = ("Длинный тестовый реквизит с переносом\n" * 75
+                                        + "КОНЕЦ_" + field)
+                pdf = renderer(data)
+                reader = PdfReader(io.BytesIO(pdf))
+                self.assertGreater(len(reader.pages), 1)
+                content = text_of(pdf)
+                for _, field in fields:
+                    self.assertIn("КОНЕЦ_" + field, content)
+                self.assertIn("Итого:", content)
+                self.assertIn("Руководитель" if kind == "invoice" else "Заказчик:", content)
+
+    def test_one_giant_word_and_multiline_fields_in_both_generators(self):
+        for kind, renderer in (("act", render_act), ("invoice", render_invoice)):
+            with self.subTest(kind=kind):
+                data = snapshot(kind)
+                data["tenant"]["name"] = "МегаСлово" * 300 + " КОНЕЦ_ИМЕНИ"
+                data["performer"]["performer_name"] = ("Строка\n" * 145 + " КОНЕЦ_ИСПОЛНИТЕЛЯ")
+                pdf = renderer(data)
+                content = text_of(pdf)
+                self.assertGreater(len(PdfReader(io.BytesIO(pdf)).pages), 1)
+                self.assertIn("КОНЕЦ_ИМЕНИ", content)
+                self.assertIn("КОНЕЦ_ИСПОЛНИТЕЛЯ", content)
+
+
+class ReviewImageRegressionTests(unittest.TestCase):
+    @staticmethod
+    def image_placements(pdf: bytes):
+        reader = PdfReader(io.BytesIO(pdf))
+        images = []
+        for page_index, page in enumerate(reader.pages):
+            def visitor(op, operands, ctm, tm):
+                if op == b"Do":
+                    # ReportLab scales a unit-square image XObject with cm.
+                    images.append((page_index, float(ctm[4]), float(ctm[5]),
+                                   float(ctm[0]), float(ctm[3])))
+            page.extract_text(visitor_operand_before=visitor)
+        return reader, images
+
+    def test_signature_stamp_xobject_count_dimensions_and_left_zone(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as folder:
+            sign = Path(folder) / "sign.png"
+            stamp = Path(folder) / "stamp.png"
+            Image.new("RGB", (240, 60), (150, 80, 50)).save(sign)
+            Image.new("RGB", (90, 90), (25, 70, 100)).save(stamp)
+            for kind, renderer in (("act", render_act), ("invoice", render_invoice)):
+                for active in ((), ("signature_path",), ("stamp_path",),
+                               ("signature_path", "stamp_path")):
+                    with self.subTest(kind=kind, active=active):
+                        data = snapshot(kind)
+                        data["performer"]["signature_path"] = str(sign) if "signature_path" in active else None
+                        data["performer"]["stamp_path"] = str(stamp) if "stamp_path" in active else None
+                        reader, placements = self.image_placements(renderer(data))
+                        self.assertEqual(len(placements), len(active))
+                        self.assertEqual(len(reader.pages[0].images), len(active))
+                        page = reader.pages[0]
+                        limit = 56 + (float(page.mediabox.width) - 112) * (.52 if kind == "act" else .54)
+                        for _, x, y, w, h in placements:
+                            self.assertGreater(w, 0)
+                            self.assertGreater(h, 0)
+                            self.assertGreaterEqual(x, 56)
+                            self.assertGreaterEqual(y, 0)
+                            self.assertLessEqual(x + w, limit)  # Not in customer/accountant region.
+                            self.assertLessEqual(y + h, float(page.mediabox.height))
+                            aspect = w / h
+                            self.assertTrue(abs(aspect - 4.0) < .05 or abs(aspect - 1.0) < .05,
+                                            f"Distorted image: {aspect}")
+
+    def test_corrupt_image_preflight_leaves_no_images_or_partial_pdf(self):
+        with tempfile.TemporaryDirectory() as folder:
+            corrupt = Path(folder) / "broken.png"
+            corrupt.write_bytes(b"garbage")
+            for kind, renderer in (("act", render_act), ("invoice", render_invoice)):
+                data = snapshot(kind)
+                data["performer"]["stamp_path"] = str(corrupt)
+                with self.assertRaises(DocumentRenderError):
+                    renderer(data)
+
+
+
+class ExtraReviewReliabilityTests(unittest.TestCase):
+    def setUp(self):
+        ExportTests.setUp(self)
+
+    def test_symlink_retarget_between_exports_blocks_second_publish(self):
+        first_dir = self.target.parent / "first"
+        second_dir = self.target.parent / "second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        first_target = first_dir / "document.pdf"
+        link_dir = self.target.parent / "aliasdir"
+        try:
+            link_dir.symlink_to(second_dir, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"Directory symlink unsupported: {exc}")
+        second_target = link_dir / "document.pdf"
+        original_mark = self.service.mark_document_generated
+        def replace_alias_after_first(document_id, *, expected_revision):
+            original_mark(document_id, expected_revision=expected_revision)
+            if document_id == 1:
+                link_dir.unlink()
+                link_dir.symlink_to(first_dir, target_is_directory=True)
+        self.service.mark_document_generated = replace_alias_after_first
+        result = export_documents(self.service, 5,
+                                  {"act": first_target, "invoice": second_target})
+        self.assertEqual(set(result.successful), {"act"})
+        self.assertEqual(set(result.failed), {"invoice"})
+        self.assertTrue(first_target.exists())
+        self.assertFalse((second_dir / "document.pdf").exists())
+        self.assertEqual(self.service.marked, [1])
+
+    def test_stale_rollback_does_not_delete_other_process_file(self):
+        from app.documents import export as exp
+        self.service.fail_mark = True
+        old_mark = self.service.mark_document_generated
+        def replace_at_mark(document_id, *, expected_revision):
+            self.target.unlink()
+            self.target.write_bytes(b"foreign replacement")
+            return old_mark(document_id, expected_revision=expected_revision)
+        self.service.mark_document_generated = replace_at_mark
+        with self.assertRaises(ExportError) as ctx:
+            export_document(self.service, 5, "act", self.target)
+        self.assertTrue(ctx.exception.recovery_failed)
+        self.assertEqual(self.target.read_bytes(), b"foreign replacement")
+        self.assertFalse(self.service.marked)
+
+    def test_existing_symlink_target_is_not_replaced_by_single_export(self):
+        original = self.target.parent / "original.pdf"
+        original.write_bytes(b"original")
+        try:
+            self.target.symlink_to(original)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(str(exc))
+        with self.assertRaises(ValueError):
+            export_document(self.service, 5, "act", self.target, overwrite=True)
+        self.assertEqual(original.read_bytes(), b"original")
+        self.assertFalse(self.service.reserved)
+
+
+class ReviewZeroPolicyTests(unittest.TestCase):
+    def setUp(self):
+        RealServiceIntegrationTests.setUp(self)
+
+    def path(self, name):
+        return RealServiceIntegrationTests.path(self, name)
+
+    # Existing behavior is preserved intentionally pending PRD clarification.
+    def test_nonzero_consumption_manual_zero_amount_does_not_require_confirmation(self):
+        self.service.update_calculation(self.calc["id"], total_amount="0.00", confirm_manual=True)
+        self.assertTrue(self.service.validate(self.calc["id"]).can_export())
+        export_document(self.service, self.calc["id"], "invoice", self.path("zero-manual"))
+        self.assertIn("0.00", text_of(self.path("zero-manual").read_bytes()))
+
+    def test_zero_consumption_manual_nonzero_amount_still_requires_confirmation(self):
+        from app.core.service import ConfirmationRequired
+        self.service.set_tariff(2026, 11, "7")
+        zero = self.service.create_calculation(self.tenant["id"], 2026, 11,
+                                               start_reading="10", end_reading="10")
+        self.service.update_calculation(zero["id"], total_amount="75.00", confirm_manual=True)
+        checked = self.service.validate(zero["id"])
+        self.assertFalse(checked.can_export())
+        self.assertTrue(checked.can_export(confirm_zero=True))
+        with self.assertRaises(ConfirmationRequired):
+            self.service.reserve_document(zero["id"], "act")
+        with self.assertRaises(ConfirmationRequired):
+            self.service.prepare_document(zero["id"], "act")
+        export_document(self.service, zero["id"], "act", self.path("zero-nonzero"),
+                        confirm_zero=True)
+        self.assertIn("75-00", text_of(self.path("zero-nonzero").read_bytes()))
 
 
 if __name__ == "__main__":

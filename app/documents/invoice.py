@@ -42,13 +42,12 @@ def render_invoice(snapshot: Mapping[str, Any]) -> bytes:
          paragraph("Сч. №", small), paragraph(performer.get("account_number", ""), small)],
         [paragraph(performer.get("performer_name", ""), body), "", ""],
         [paragraph("Получатель", small), "", ""],
-    ], colWidths=[width * .57, width * .095, width * .335], hAlign="LEFT")
+    ], colWidths=[width * .57, width * .095, width * .335], hAlign="LEFT", splitInRow=1)
     bank.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), .55, colors.black),
         ("SPAN", (0, 3), (0, 3)),
         ("SPAN", (0, 4), (0, 4)),
         ("SPAN", (1, 2), (1, 4)),
-        ("SPAN", (2, 2), (2, 4)),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 3),
         ("RIGHTPADDING", (0, 0), (-1, -1), 2),
@@ -67,7 +66,7 @@ def render_invoice(snapshot: Mapping[str, Any]) -> bytes:
          paragraph(quantity(calc["consumption"]), center), paragraph("кВт", center),
          paragraph(quantity(tariff["rate"]), center),
          paragraph(invoice_money(calc["total_amount"]), center)],
-    ], colWidths=widths, repeatRows=1)
+    ], colWidths=widths, repeatRows=1, splitInRow=1)
     items.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), .65, colors.black),
         ("BOX", (0, 0), (-1, -1), 1.35, colors.black),

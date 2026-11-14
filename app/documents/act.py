@@ -37,7 +37,7 @@ def render_act(snapshot: Mapping[str, Any]) -> bytes:
     tenant_info = "\n".join(filter(None, ("Заказчик:", tenant.get("name"),
                          tenant.get("legal_address"))))
     parties = Table([[paragraph(performer_info, body), paragraph(tenant_info, body)]],
-                    colWidths=[width * .65, width * .35])
+                    colWidths=[width * .65, width * .35], splitInRow=1)
     parties.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
                                   ("LEFTPADDING", (0, 0), (-1, -1), 0),
                                   ("RIGHTPADDING", (0, 0), (-1, -1), 8),
@@ -58,7 +58,7 @@ def render_act(snapshot: Mapping[str, Any]) -> bytes:
          paragraph(quantity(calc["consumption"]), right),
          paragraph(quantity(tariff["rate"]).replace(".", "-"), right),
          paragraph(act_money(calc["total_amount"]), right)]
-    ], colWidths=widths, hAlign="LEFT", repeatRows=1)
+    ], colWidths=widths, hAlign="LEFT", repeatRows=1, splitInRow=1)
     table.setStyle(TableStyle([
         ("LINEABOVE", (0, 0), (-1, 0), .55, colors.black),
         ("LINEBELOW", (0, 0), (-1, 0), .55, colors.black),
