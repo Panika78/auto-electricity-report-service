@@ -20,7 +20,7 @@ from app.data import database as db
 from app.data import queries
 from app.documents import ExportError, export_document, safe_filename
 from app.documents.export import _assert_unique_destinations
-from .common import (CANCELLED, appearance_settings, apply_appearance, image_directory,
+from .common import (CANCELLED, appearance_settings, apply_appearance, guard_database_errors,
                      import_image, remove_managed_image, parse_number, run_confirmed, show_error, show_number)
 
 
@@ -155,6 +155,7 @@ class TenantDialog(QDialog):
             self.pending.add(name)
             self.note.setText("Изменения поля ещё не сохранены")
 
+    @guard_database_errors("Ошибка базы данных")
     def _load(self) -> None:
         if self.tenant_id is None:
             return
@@ -198,6 +199,7 @@ class TenantDialog(QDialog):
             self.pending.add(key)
             self._save(key)
 
+    @guard_database_errors("Ошибка базы данных")
     def _save(self, key: str) -> None:
         try:
             value = self._value(key)
@@ -228,6 +230,7 @@ class TenantDialog(QDialog):
             self.note.setText("Изменение сохранено")
             self._reload_history()
 
+    @guard_database_errors("Ошибка базы данных")
     def _create(self) -> None:
         try:
             details = {key: self._value(key) for key, _ in TENANT_FIELDS}
@@ -248,6 +251,7 @@ class TenantDialog(QDialog):
         self.note.setText("Арендатор создан. Дальнейшие изменения сохраняются автоматически.")
         self._load()
 
+    @guard_database_errors("Ошибка базы данных")
     def _toggle_archive(self) -> None:
         if self.pending:
             QMessageBox.warning(
@@ -269,6 +273,7 @@ class TenantDialog(QDialog):
         if result is not CANCELLED:
             self._load()
 
+    @guard_database_errors("Ошибка базы данных")
     def _reload_history(self) -> None:
         if self.tenant_id is None:
             return
@@ -286,6 +291,7 @@ class TenantDialog(QDialog):
                 self.history.setItem(row, column, QTableWidgetItem(str(value)))
         self.history.resizeColumnsToContents()
 
+    @guard_database_errors("Ошибка базы данных")
     def _open_calculation(self) -> None:
         row = self.history.currentRow()
         if row < 0:
@@ -400,22 +406,28 @@ class CalculationDialog(QDialog):
         control.clicked.connect(callback)
         return control
 
+    @guard_database_errors("Ошибка базы данных")
     def _load_tenants(self) -> None:
-        self.tenant_picker.blockSignals(True)
-        self.tenant_picker.clear()
+        # Read first: a locked database must not erase the old tenant choices
+        # or leave Qt signals blocked forever.
         with self.database.connection() as conn:
             tenants = db.list_tenants(conn, include_archived=True)
         if self.calculation_id is None:
             tenants = [t for t in tenants if not t["is_archived"]]
-        for record in tenants:
-            self.tenant_picker.addItem(record["name"], record["id"])
-        self.tenant_picker.blockSignals(False)
+        self.tenant_picker.blockSignals(True)
+        try:
+            self.tenant_picker.clear()
+            for record in tenants:
+                self.tenant_picker.addItem(record["name"], record["id"])
+        finally:
+            self.tenant_picker.blockSignals(False)
 
     def _mark_pending(self, name: str) -> None:
         if self.calculation_id is not None and not self._filling:
             self.pending.add(name)
             self.status.setText("Есть ещё не сохранённые изменения поля.")
 
+    @guard_database_errors("Ошибка базы данных")
     def _suggest_start(self) -> None:
         if self.calculation_id is not None or self.tenant_picker.currentData() is None:
             return
@@ -431,6 +443,7 @@ class CalculationDialog(QDialog):
         except (LookupError, ValueError) as error:
             self.start_hint.setText(str(error))
 
+    @guard_database_errors("Ошибка базы данных")
     def _create(self) -> None:
         tenant_id = self.tenant_picker.currentData()
         if tenant_id is None:
@@ -457,58 +470,62 @@ class CalculationDialog(QDialog):
         self._refresh()
         self.status.setText("Расчёт создан и сохранён. Дальнейшие изменения сохраняются автоматически.")
 
+    @guard_database_errors("Ошибка загрузки расчёта")
     def _refresh(self) -> None:
-        # A different field may have been entered but not yet committed
-        # (including temporarily inconsistent dates). Never overwrite it.
+        # Read all database state before mutating form widgets. A locked DB must
+        # not partially overwrite unsaved user input or strand _filling=True.
         unsaved = set(self.pending)
         unsaved_start = self.start_edit.text()
         unsaved_end = self.end_edit.text()
         unsaved_dates = (self.date_start.date(), self.date_end.date())
-        self._filling = True
-        self.create_button.setVisible(self.calculation_id is None)
-        self.delete_button.setVisible(self.calculation_id is not None)
+        calc = None
+        checked = None
         if self.calculation_id is not None:
             calc = self.service.get_calculation(self.calculation_id)
-            index = self.tenant_picker.findData(calc["tenant_id"])
-            self.tenant_picker.setCurrentIndex(index)
-            self.tenant_picker.setEnabled(False)
-            self.date_start.setDate(QDate.fromString(calc["period_start"], "yyyy-MM-dd"))
-            self.date_end.setDate(QDate.fromString(calc["period_end"], "yyyy-MM-dd"))
-            self.start_edit.setText(show_number(calc["start_reading"]))
-            self.end_edit.setText(show_number(calc["end_reading"]))
-            self.consumption.setText(show_number(calc["consumption"]))
-            self.amount.setText(show_number(calc["total_amount"]))
             checked = self.service.validate(self.calculation_id)
-            details = checked.warnings + checked.errors
-            self.status.setText(("Готов к экспорту" if checked.ready else "Черновик") +
-                                ("\n" + "\n".join(details) if details else ""))
-            self.start_hint.setText(
-                {"manual": "Введено вручную", "previous_month": "Из предыдущего месяца",
-                 "initial": "Из карточки арендатора", "unspecified": "Источник не задан"}.get(
-                    calc["start_reading_source"], ""))
-        else:
-            self.consumption.setText("")
-            self.amount.setText("")
-            self.status.setText("Новый расчёт будет сохранён как черновик, даже без конечного показания.")
-            self._suggest_start()
         with self.database.connection() as conn:
             tariff = queries.month_tariff(conn, self.year, self.month)
-        self.tariff_label.setText(show_number(tariff["rate"]) if tariff else "Не установлен")
-        self._filling = False
-        if self.calculation_id is not None and unsaved:
-            self._filling = True
-            if "start_reading" in unsaved:
-                self.start_edit.setText(unsaved_start)
-            if "end_reading" in unsaved:
-                self.end_edit.setText(unsaved_end)
-            if "period" in unsaved:
-                self.date_start.setDate(unsaved_dates[0])
-                self.date_end.setDate(unsaved_dates[1])
+        self._filling = True
+        try:
+            self.create_button.setVisible(self.calculation_id is None)
+            self.delete_button.setVisible(self.calculation_id is not None)
+            if calc is not None:
+                index = self.tenant_picker.findData(calc["tenant_id"])
+                self.tenant_picker.setCurrentIndex(index)
+                self.tenant_picker.setEnabled(False)
+                self.date_start.setDate(QDate.fromString(calc["period_start"], "yyyy-MM-dd"))
+                self.date_end.setDate(QDate.fromString(calc["period_end"], "yyyy-MM-dd"))
+                self.start_edit.setText(show_number(calc["start_reading"]))
+                self.end_edit.setText(show_number(calc["end_reading"]))
+                self.consumption.setText(show_number(calc["consumption"]))
+                self.amount.setText(show_number(calc["total_amount"]))
+                details = checked.warnings + checked.errors
+                self.status.setText(("Готов к экспорту" if checked.ready else "Черновик") +
+                                    ("\n" + "\n".join(details) if details else ""))
+                self.start_hint.setText(
+                    {"manual": "Введено вручную", "previous_month": "Из предыдущего месяца",
+                     "initial": "Из карточки арендатора", "unspecified": "Источник не задан"}.get(
+                        calc["start_reading_source"], ""))
+            else:
+                self.consumption.setText("")
+                self.amount.setText("")
+                self.status.setText("Новый расчёт будет сохранён как черновик, даже без конечного показания.")
+                self._suggest_start()
+            self.tariff_label.setText(show_number(tariff["rate"]) if tariff else "Не установлен")
+            if calc is not None and unsaved:
+                if "start_reading" in unsaved:
+                    self.start_edit.setText(unsaved_start)
+                if "end_reading" in unsaved:
+                    self.end_edit.setText(unsaved_end)
+                if "period" in unsaved:
+                    self.date_start.setDate(unsaved_dates[0])
+                    self.date_end.setDate(unsaved_dates[1])
+                self.status.setText(
+                    self.status.text() + "\nЕсть несохранённые изменения: " + ", ".join(sorted(unsaved)))
+        finally:
             self._filling = False
-            self.status.setText(
-                self.status.text() + "\nЕсть несохранённые изменения: " + ", ".join(sorted(unsaved))
-            )
 
+    @guard_database_errors("Ошибка базы данных")
     def _save_reading(self, key: str) -> None:
         if self.calculation_id is None or self._filling or key not in self.pending:
             return
@@ -530,12 +547,16 @@ class CalculationDialog(QDialog):
         self.pending.discard(key)
         self._refresh()
 
+    @guard_database_errors("Ошибка базы данных")
     def _save_period(self) -> None:
         if self.calculation_id is None:
             self._suggest_start()
             return
         if self._filling:
             return
+        # Mark the new date as pending BEFORE trying SQLite; otherwise a read
+        # failure would allow the dialog to close and silently discard it.
+        self.pending.add("period")
         start = self.date_start.date().toString("yyyy-MM-dd")
         end = self.date_end.date().toString("yyyy-MM-dd")
         current = self.service.get_calculation(self.calculation_id)
@@ -558,6 +579,7 @@ class CalculationDialog(QDialog):
             self.pending.discard("period")
             self._refresh()
 
+    @guard_database_errors("Ошибка базы данных")
     def _manual(self, field: str, label: str, places: int) -> None:
         if self.pending:
             QMessageBox.warning(self, label, "Сначала сохраните или исправьте незавершённые поля.")
@@ -583,6 +605,7 @@ class CalculationDialog(QDialog):
         if result is not CANCELLED:
             self._refresh()
 
+    @guard_database_errors("Ошибка базы данных")
     def _open_tenant(self) -> None:
         """Navigate directly from a calculation to its tenant and full history."""
         if self.pending:
@@ -608,6 +631,7 @@ class CalculationDialog(QDialog):
     def _edit_amount(self) -> None:
         self._manual("total_amount", "Ручная сумма", 2)
 
+    @guard_database_errors("Ошибка базы данных")
     def _export(self) -> None:
         if self.pending:
             QMessageBox.warning(self, "PDF", "Есть несохранённые изменения. Исправьте их перед выгрузкой.")
@@ -718,6 +742,7 @@ class SettingsPage(QWidget):
         outer.addWidget(self.note)
         self.reload()
 
+    @guard_database_errors("Ошибка базы данных")
     def reload(self) -> None:
         with self.service.database.connection() as conn:
             record = db.get_settings(conn)
@@ -738,8 +763,9 @@ class SettingsPage(QWidget):
             widget.setCurrentIndex(index if index >= 0 else widget.findData(fallback))
         self._filling = False
 
+    @guard_database_errors("Ошибка базы данных")
     def _save_field(self, key: str) -> None:
-        if self._filling:
+        if self._filling or key not in self.pending:
             return
         value = self.fields[key].text().strip()
         with self.service.database.connection() as conn:
@@ -755,6 +781,7 @@ class SettingsPage(QWidget):
         else:
             self.note.setText("Поле не сохранено. Исправьте ошибку перед уходом со страницы.")
 
+    @guard_database_errors("Ошибка базы данных")
     def _save_reuse(self, enabled: bool) -> None:
         if self._filling:
             return
@@ -763,15 +790,16 @@ class SettingsPage(QWidget):
         if result is CANCELLED:
             self.reload()
 
+    @guard_database_errors("Ошибка базы данных")
     def _select_image(self, key: str) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Выбрать изображение", "", "Изображения (*.png *.jpg *.jpeg)")
         if not path:
             return
-        with self.service.database.connection() as conn:
-            previous = db.get_settings(conn)[key]
         uploaded = None
         try:
+            with self.service.database.connection() as conn:
+                previous = db.get_settings(conn)[key]
             uploaded = import_image(path, "signature" if key == "signature_path" else "stamp")
             result = self.service.update_settings(**{key: str(uploaded)})
             if result is None:
@@ -788,6 +816,7 @@ class SettingsPage(QWidget):
             QMessageBox.warning(self, "Очистка старого изображения", str(error))
         self.note.setText("Изображение сохранено в локальной папке приложения.")
 
+    @guard_database_errors("Ошибка базы данных")
     def _remove_image(self, key: str) -> None:
         if QMessageBox.question(
             self, "Удаление изображения", "Удалить изображение из настроек исполнителя?",
@@ -856,8 +885,8 @@ class ExportDialog(QDialog):
             checkbox.toggled.connect(date.setEnabled)
             if not current_document:
                 date.dateChanged.connect(
-                    lambda new_date, k=kind, control=number: control.setValue(
-                        self.service.next_document_number(k, new_date.toString("yyyy-MM-dd"))))
+                    lambda new_date, k=kind, control=number: self._update_number_for_date(
+                        k, new_date, control))
             self.options[kind] = (checkbox, number, date)
             outer.addWidget(group)
         actions = QHBoxLayout()
@@ -870,6 +899,13 @@ class ExportDialog(QDialog):
         actions.addWidget(send)
         outer.addLayout(actions)
 
+    @guard_database_errors("Ошибка получения номера документа")
+    def _update_number_for_date(self, kind: str, new_date: QDate, control: QSpinBox) -> None:
+        next_number = self.service.next_document_number(
+            kind, new_date.toString("yyyy-MM-dd"))
+        control.setValue(next_number)
+
+    @guard_database_errors("Ошибка базы данных")
     def _export(self) -> None:
         chosen = {kind: (spin.value(), date.date().toString("yyyy-MM-dd"))
                   for kind, (check, spin, date) in self.options.items() if check.isChecked()}
