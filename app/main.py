@@ -12,7 +12,7 @@ def main(db_path: Path | str | None = None) -> int:
     from app.ui.main_window import MainWindow
 
     app = QApplication.instance() or QApplication([])
-    app.setApplicationName("Контакт")
+    app.setApplicationName("контакт")
 
     try:
         database = Database(db_path)
@@ -26,7 +26,19 @@ def main(db_path: Path | str | None = None) -> int:
         )
         return 1
 
-    window = MainWindow()
+    try:
+        # UI bootstrap also reads SQLite (performer/settings and initial cards).
+        # A failed read must not leave an empty, editable screen running.
+        window = MainWindow(database)
+    except (OSError, sqlite3.Error, RuntimeError, LookupError) as exc:
+        QMessageBox.critical(
+            None,
+            "Ошибка загрузки интерфейса",
+            f"Не удалось загрузить данные приложения. Окно не открыто.\n\n{exc}\n\n"
+            "Проверьте доступность базы данных и запустите приложение повторно. "
+            "Существующая база не сбрасывалась.",
+        )
+        return 1
     window.show()
     return app.exec()
 
