@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from functools import wraps
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -46,6 +47,28 @@ def explain_error(error: BaseException) -> str:
 
 def show_error(parent: QWidget, error: BaseException, title: str = "Не удалось сохранить") -> None:
     QMessageBox.critical(parent, title, explain_error(error))
+
+
+def guard_database_errors(title: str = "Ошибка доступа к базе данных"):
+    """Protect Qt slots against SQLite read failures before service calls.
+
+    A failed operation must not be reported as saved or close the dialog.
+    Pending form values are intentionally left untouched for a later retry.
+    """
+    def decorate(slot):
+        @wraps(slot)
+        def protected(self, *args, **kwargs):
+            try:
+                return slot(self, *args, **kwargs)
+            except (sqlite3.Error, OSError) as error:
+                if getattr(self, "note", None) is not None:
+                    self.note.setText("Ошибка базы данных. Введённые значения не сохранены.")
+                elif getattr(self, "status", None) is not None:
+                    self.status.setText("Ошибка базы данных. Повторите операцию после восстановления доступа.")
+                show_error(self, error, title)
+                return CANCELLED
+        return protected
+    return decorate
 
 
 def run_confirmed(parent: QWidget, operation: Callable[[dict[str, bool]], Any]) -> Any:
