@@ -109,7 +109,7 @@ def _case_sensitive_directory(parent: Path) -> bool:
     os.close(fd)
     sample = Path(name)
     try:
-        variant = sample.with_name(sample.name[:-2] + "-aA")
+        variant = sample.with_name(sample.name[:-2] + "aA")
         return not variant.exists() or not os.path.samefile(sample, variant)
     finally:
         sample.unlink()
