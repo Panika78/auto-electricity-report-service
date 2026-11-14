@@ -82,7 +82,7 @@ class TenantDialog(QDialog):
         self.resize(760, 720)
         outer = QVBoxLayout(self)
         header = QLabel("Реквизиты арендатора и договор")
-        header.setStyleSheet("font-size:19px; font-weight:700;")
+        header.setProperty("kontaktHeadingSize", 19)
         outer.addWidget(header)
         tabs = QTabWidget()
         outer.addWidget(tabs, 1)
@@ -145,6 +145,7 @@ class TenantDialog(QDialog):
         outer.addLayout(actions)
 
         self._load()
+        apply_appearance()
         self.history.setEnabled(self.tenant_id is not None)
         self.archive_button.setVisible(self.tenant_id is not None)
         self.create_button.setVisible(self.tenant_id is None)
@@ -327,7 +328,7 @@ class CalculationDialog(QDialog):
         self.resize(650, 610)
         outer = QVBoxLayout(self)
         head = QLabel("Расчёт за выбранный период")
-        head.setStyleSheet("font-size:20px; font-weight:700;")
+        head.setProperty("kontaktHeadingSize", 20)
         outer.addWidget(head)
         form = QFormLayout()
         self.tenant_picker = QComboBox()
@@ -385,6 +386,7 @@ class CalculationDialog(QDialog):
         bottom.addWidget(self._button("Готово", self.accept))
         outer.addLayout(bottom)
         self._refresh()
+        apply_appearance()
 
     @staticmethod
     def _button(label, callback):
@@ -604,7 +606,7 @@ class SettingsPage(QWidget):
         self.setObjectName("workspace")
         outer = QVBoxLayout(self)
         heading = QLabel("Настройки")
-        heading.setStyleSheet("font-size:27px; font-weight:700;")
+        heading.setProperty("kontaktHeadingSize", 27)
         outer.addWidget(heading)
         tabs = QTabWidget()
         outer.addWidget(tabs, 1)
@@ -662,6 +664,7 @@ class SettingsPage(QWidget):
         self.note.setStyleSheet("color:#657276;")
         outer.addWidget(self.note)
         self.reload()
+        apply_appearance()
 
     def reload(self) -> None:
         with self.service.database.connection() as conn:
