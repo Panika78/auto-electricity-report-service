@@ -79,6 +79,8 @@ class TenantDialog(QDialog):
         self.service, self.database, self.tenant_id = service, database, tenant_id
         self.pending: set[str] = set()
         self._filling = False
+        # Initial loading is fail-closed: never expose a blank editable card.
+        self._initial_load = True
         self.setWindowTitle("Карточка арендатора" if tenant_id else "Новый арендатор")
         self.resize(760, 720)
         outer = QVBoxLayout(self)
@@ -146,6 +148,7 @@ class TenantDialog(QDialog):
         outer.addLayout(actions)
 
         self._load()
+        self._initial_load = False
         self.history.setEnabled(self.tenant_id is not None)
         self.archive_button.setVisible(self.tenant_id is not None)
         self.create_button.setVisible(self.tenant_id is None)
@@ -332,6 +335,7 @@ class CalculationDialog(QDialog):
         self.year, self.month = year, month
         self.pending: set[str] = set()
         self._filling = False
+        self._initial_load = True
         if calculation_id is not None:
             record = self.service.get_calculation(calculation_id)
             self.year, self.month = record["year"], record["month"]
@@ -399,6 +403,7 @@ class CalculationDialog(QDialog):
         bottom.addWidget(self._button("Готово", self.accept))
         outer.addLayout(bottom)
         self._refresh()
+        self._initial_load = False
 
     @staticmethod
     def _button(label, callback):
@@ -679,6 +684,7 @@ class SettingsPage(QWidget):
         self.service = service
         self._filling = False
         self.pending: set[str] = set()
+        self._initial_load = True
         self.setObjectName("workspace")
         outer = QVBoxLayout(self)
         heading = QLabel("Настройки")
@@ -741,6 +747,7 @@ class SettingsPage(QWidget):
         self.note.setStyleSheet("color:#657276;")
         outer.addWidget(self.note)
         self.reload()
+        self._initial_load = False
 
     @guard_database_errors("Ошибка базы данных")
     def reload(self) -> None:
