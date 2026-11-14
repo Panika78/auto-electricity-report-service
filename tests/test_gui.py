@@ -24,7 +24,7 @@ class GuiSmokeTests(unittest.TestCase):
         window = MainWindow()
         window.show()
         self.assertTrue(window.isVisible())
-        self.assertIn("Контакт", window.windowTitle())
+        self.assertTrue(window.windowTitle().startswith("контакт"))
         window.close()
         self.assertFalse(window.isVisible())
 
@@ -36,6 +36,7 @@ class GuiSmokeTests(unittest.TestCase):
             path = Path(directory) / "app.db"
             with mock.patch.object(QApplication, "exec", return_value=0):
                 self.assertEqual(main(db_path=path), 0)
+            self.assertEqual(QApplication.applicationName(), "контакт")
             self.assertTrue(path.is_file())
 
     def test_startup_initialization_error_is_reported(self):
