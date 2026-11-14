@@ -214,14 +214,19 @@ def _backup(path: Path) -> Path:
         raise
 
 
-def _identity(path: Path) -> tuple[int, int]:
+def _identity(path: Path) -> tuple[int, int, int, int]:
+    """Include size/mtime to detect inode reuse and in-place foreign writes.
+
+    Do not use ctime: creating a hard link legitimately updates inode ctime.
+    Even this is best-effort; a hostile process can modify metadata deliberately.
+    """
     stat = path.stat(follow_symlinks=False)
-    return stat.st_dev, stat.st_ino
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
-def _unlink_if_owned(path: Path, identity: tuple[int, int]) -> None:
-    """Do not remove a destination replaced by another process since publication."""
-    if _identity(path) != identity:
+def _unlink_if_owned(path: Path, identity: tuple[int, ...]) -> None:
+    """Do not unlink a replaced file; pre-write fd snapshots only know dev/inode."""
+    if _identity(path)[:len(identity)] != identity:
         raise OSError("Целевой файл изменён сторонним процессом; удаление запрещено.")
     path.unlink()
 
@@ -279,7 +284,7 @@ class _UnsafeRollback(OSError):
 
 
 def _rollback_published(target: Path, backup: Path | None,
-                        published_identity: tuple[int, int] | None
+                        published_identity: tuple[int, ...] | None
                         ) -> tuple[Path | None, BaseException | None]:
     """Restore without replacing a foreign file in a check/replace race.
 
@@ -383,7 +388,7 @@ def export_document(service: CalculationService, calculation_id: int, kind: str,
     leftover_staged: Path | None = None
     backup: Path | None = None
     backup_identity: tuple[int, int] | None = None
-    published_identity: tuple[int, int] | None = None
+    published_identity: tuple[int, ...] | None = None
     quarantine_path: Path | None = None
     saved = False
     marked = False
@@ -454,12 +459,16 @@ def export_document(service: CalculationService, calculation_id: int, kind: str,
         message = "Не удалось завершить экспорт PDF; отметка генерации не установлена."
         if recovery_error is not None:
             message += " Безопасное восстановление не завершено; проверьте сохранённые файлы."
+            if backup is not None:
+                message += " Резервная копия сохранена для ручного восстановления."
         if additional:
             message += " Остались файлы, требующие ручной очистки."
         backup_path = backup if backup is not None else (previous.backup_path if previous else None)
         partial_path = previous.partial_path if previous else None
         staged_path = leftover_staged or (previous.staged_path if previous else None)
         quarantine = quarantine_path or (previous.quarantine_path if previous else None)
+        primary_cause = (error.__cause__ if previous is not None and error.__cause__ is not None
+                         else error)
         raise ExportError(
             message,
             path=target if recovery_error is not None else (previous.path if previous else None),
@@ -471,7 +480,7 @@ def export_document(service: CalculationService, calculation_id: int, kind: str,
             recovery_error=recovery_error or (previous.recovery_error if previous else None),
             cleanup_error=additional[0] if additional else None,
             cleanup_errors=tuple(additional),
-        ) from error
+        ) from primary_cause
 
     # The database already records a successful export. Cleanup cannot undo it.
     warnings = []
