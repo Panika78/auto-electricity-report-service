@@ -182,5 +182,115 @@ class NativeWorkflowTests(unittest.TestCase):
             from app.ui.common import apply_appearance
             apply_appearance()
 
+    def test_overlapping_calculations_can_be_created_after_confirmation(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.data import database as db
+        from app.ui.forms import CalculationDialog
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        self.service.create_calculation(
+            tenant["id"], 2026, 10, period_start="2026-10-01",
+            period_end="2026-10-20", start_reading="0", end_reading="10")
+        editor = CalculationDialog(self.service, self.database, year=2026, month=10)
+        editor.date_start.setDate(__import__("PySide6.QtCore", fromlist=["QDate"]).QDate(2026, 10, 15))
+        with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            editor._create()
+        self.assertIsInstance(editor.calculation_id, int)
+        with self.database.connection() as conn:
+            self.assertEqual(len(db.list_calculations(
+                conn, tenant_id=tenant["id"], year=2026, month=10)), 2)
+        editor.close()
+
+    def test_reverse_meter_reading_persists_as_invalid_draft(self):
+        from app.ui.forms import CalculationDialog
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="50", end_reading="70")
+        dialog = CalculationDialog(self.service, self.database, calculation_id=calc["id"])
+        dialog.end_edit.setText("40")
+        dialog._mark_pending("end_reading")
+        dialog._save_reading("end_reading")
+        result = self.service.validate(calc["id"])
+        self.assertFalse(result.ready)
+        self.assertTrue(any("меньше" in error for error in result.errors))
+        self.assertEqual(str(self.service.get_calculation(calc["id"])["end_reading"]), "40")
+        dialog.close()
+
+    def test_failed_export_does_not_mark_generated(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from app.ui.forms import ExportDialog
+        from app.data import database as db
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="50", end_reading="70")
+        dialog = ExportDialog(self.service, self.database, calc["id"])
+        dialog.options["invoice"][0].setChecked(False)
+        destination = Path(self.dir.name) / "nonexistent" / "act.pdf"
+        with mock.patch.object(QFileDialog, "getSaveFileName",
+                               return_value=(str(destination), "PDF (*.pdf)")), \
+             mock.patch.object(QMessageBox, "warning") as warning:
+            dialog._export()
+            warning.assert_called_once()
+        self.assertEqual(self.service.document_status(calc["id"], "act"), "not_created")
+        with self.database.connection() as conn:
+            self.assertEqual(db.list_documents(conn, calculation_id=calc["id"]), [])
+        dialog.close()
+
+    def test_repeated_pdf_export_preserves_document_date_and_number(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from app.ui.forms import ExportDialog
+        from app.data import database as db
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="50", end_reading="70")
+        path = Path(self.dir.name) / "act.pdf"
+        with mock.patch.object(QFileDialog, "getSaveFileName",
+                               return_value=(str(path), "PDF (*.pdf)")), \
+             mock.patch.object(QMessageBox, "information"):
+            first = ExportDialog(self.service, self.database, calc["id"])
+            first.options["invoice"][0].setChecked(False)
+            first._export()
+        with self.database.connection() as conn:
+            original = next(d for d in db.list_documents(conn, calculation_id=calc["id"]) if d["type"] == "act")
+        with mock.patch.object(QFileDialog, "getSaveFileName",
+                               return_value=(str(path), "PDF (*.pdf)")), \
+             mock.patch.object(QMessageBox, "information"), \
+             mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            second = ExportDialog(self.service, self.database, calc["id"])
+            second.options["invoice"][0].setChecked(False)
+            second._export()
+        with self.database.connection() as conn:
+            updated = next(d for d in db.list_documents(conn, calculation_id=calc["id"]) if d["type"] == "act")
+        self.assertEqual((updated["number"], updated["document_date"]),
+                         (original["number"], original["document_date"]))
+        self.assertEqual(self.service.document_status(calc["id"], "act"), "current")
+
+    def test_signature_upload_and_removal_use_owned_app_directory(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from PySide6.QtGui import QImage
+        from app.ui.forms import SettingsPage
+        from app.data import database as db
+        source = Path(self.dir.name) / "synthetic.png"
+        image = QImage(6, 6, QImage.Format.Format_RGB32)
+        image.fill(0xFFFFFFFF)
+        self.assertTrue(image.save(str(source)))
+        page = SettingsPage(self.service)
+        with mock.patch.object(QFileDialog, "getOpenFileName",
+                               return_value=(str(source), "Изображения (*.png *.jpg *.jpeg)")):
+            page._select_image("signature_path")
+        with self.database.connection() as conn:
+            path = db.get_settings(conn)["signature_path"]
+        self.assertTrue(path)
+        self.assertTrue(Path(path).is_file())
+        self.assertNotEqual(Path(path).resolve(), source.resolve())
+        with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            page._remove_image("signature_path")
+        with self.database.connection() as conn:
+            self.assertIsNone(db.get_settings(conn)["signature_path"])
+        self.assertFalse(Path(path).exists())
+
 if __name__ == "__main__":
     unittest.main()
