@@ -20,7 +20,7 @@ from app.data import database as db
 from app.data import queries
 from app.documents import ExportError, export_document, safe_filename
 from .common import (CANCELLED, appearance_settings, apply_appearance, image_directory,
-                     import_image, parse_number, run_confirmed, show_error, show_number)
+                     import_image, remove_managed_image, parse_number, run_confirmed, show_error, show_number)
 
 
 TENANT_FIELDS = [
@@ -306,6 +306,9 @@ class TenantDialog(QDialog):
             return
         super().accept()
 
+    def reject(self) -> None:
+        self.accept()  # closing with X must not silently discard pending edits
+
 
 class CalculationDialog(QDialog):
     """Edit fields independently, committing only validated edits through the service."""
@@ -588,6 +591,9 @@ class CalculationDialog(QDialog):
             return
         super().accept()
 
+    def reject(self) -> None:
+        self.accept()  # closing with X must not silently discard pending edits
+
 
 class SettingsPage(QWidget):
     """Performer data in SQLite, purely visual preferences in QSettings."""
@@ -704,6 +710,8 @@ class SettingsPage(QWidget):
             self, "Выбрать изображение", "", "Изображения (*.png *.jpg *.jpeg)")
         if not path:
             return
+        with self.service.database.connection() as conn:
+            previous = db.get_settings(conn)[key]
         uploaded = None
         try:
             uploaded = import_image(path, "signature" if key == "signature_path" else "stamp")
@@ -716,6 +724,10 @@ class SettingsPage(QWidget):
             show_error(self, error, "Ошибка загрузки изображения")
             return
         self.reload()
+        try:
+            remove_managed_image(previous)
+        except OSError as error:
+            QMessageBox.warning(self, "Очистка старого изображения", str(error))
         self.note.setText("Изображение сохранено в локальной папке приложения.")
 
     def _remove_image(self, key: str) -> None:
@@ -725,10 +737,17 @@ class SettingsPage(QWidget):
             QMessageBox.StandardButton.No,
         ) != QMessageBox.StandardButton.Yes:
             return
+        with self.service.database.connection() as conn:
+            previous = db.get_settings(conn)[key]
         result = run_confirmed(self, lambda _flags: self.service.update_settings(
             **{key: None}))
         if result is not CANCELLED:
             self.reload()
+            try:
+                remove_managed_image(previous)
+            except OSError as error:
+                QMessageBox.warning(self, "Очистка изображения",
+                                    "Ссылка удалена, но файл остался: " + str(error))
 
     def _change_appearance(self, key: str, value: str) -> None:
         if self._filling or value is None:
