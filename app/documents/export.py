@@ -7,6 +7,7 @@ was not restored, and report both the primary error and recovery/cleanup issues.
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import re
 import shutil
@@ -224,6 +225,27 @@ def _identity(path: Path) -> tuple[int, int, int, int]:
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
+def _sha256_file(path: Path) -> bytes:
+    """Hash the current bytes without loading a confidential PDF into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.digest()
+
+
+def _is_published_pdf(path: Path, identity: tuple[int, ...],
+                      expected_digest: bytes) -> bool:
+    """Best-effort unchanged check; metadata alone cannot prove file ownership.
+
+    Verify identity again after hashing in case a writer swaps the path during
+    the read. For a rollback, repeat this check on the *moved* inode too.
+    """
+    return (_identity(path) == identity
+            and _sha256_file(path) == expected_digest
+            and _identity(path) == identity)
+
+
 def _unlink_if_owned(path: Path, identity: tuple[int, ...]) -> None:
     """Do not unlink a replaced file; pre-write fd snapshots only know dev/inode."""
     if _identity(path)[:len(identity)] != identity:
@@ -284,8 +306,8 @@ class _UnsafeRollback(OSError):
 
 
 def _rollback_published(target: Path, backup: Path | None,
-                        published_identity: tuple[int, ...] | None
-                        ) -> tuple[Path | None, BaseException | None]:
+                        published_identity: tuple[int, ...] | None,
+                        expected_digest: bytes) -> tuple[Path | None, BaseException | None]:
     """Restore without replacing a foreign file in a check/replace race.
 
     First move the current target to a private quarantine, then verify *what
@@ -295,8 +317,10 @@ def _rollback_published(target: Path, backup: Path | None,
     """
     if published_identity is None:
         raise _UnsafeRollback("Идентификатор опубликованного PDF неизвестен; откат запрещён.")
-    if _identity(target) != published_identity:
-        raise _UnsafeRollback("Целевой PDF заменён другим процессом; откат запрещён.")
+    if not _is_published_pdf(target, published_identity, expected_digest):
+        raise _UnsafeRollback(
+            "Целевой PDF изменён после публикации (метаданные или SHA-256); откат запрещён."
+        )
 
     fd, name = tempfile.mkstemp(prefix=".kontakt-rollback-", suffix=".pdf", dir=target.parent)
     try:
@@ -309,7 +333,7 @@ def _rollback_published(target: Path, backup: Path | None,
         os.replace(target, quarantine)
         moved = True
         moved_identity = _identity(quarantine)
-        if moved_identity != published_identity:
+        if not _is_published_pdf(quarantine, published_identity, expected_digest):
             # The other process changed the file *after* our first check.
             # Return its exact contents without clobbering a new target.
             try:
@@ -383,6 +407,10 @@ def export_document(service: CalculationService, calculation_id: int, kind: str,
     if latest["revision"] != snapshot["revision"]:
         raise ExportError("Данные изменились во время подготовки PDF; файл не записан.")
 
+    # Expected bytes come from the renderer, never from the possibly modified
+    # destination. A post-publication digest would trust foreign edits.
+    published_digest = hashlib.sha256(pdf_bytes).digest()
+
     staged: Path | None = None
     staged_identity: tuple[int, int] | None = None
     leftover_staged: Path | None = None
@@ -420,7 +448,7 @@ def export_document(service: CalculationService, calculation_id: int, kind: str,
         if saved:
             try:
                 quarantine_path, quarantine_cleanup = _rollback_published(
-                    target, backup, published_identity)
+                    target, backup, published_identity, published_digest)
                 if quarantine_cleanup is not None:
                     cleanup_errors.append(quarantine_cleanup)
             except BaseException as rollback_exc:

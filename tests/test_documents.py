@@ -1025,6 +1025,183 @@ class SecondReviewExportRegressionTests(unittest.TestCase):
         self.assertFalse(self.service.marked)
 
 
+class ChecksumRollbackRegressionTests(unittest.TestCase):
+    """Spoof unchanged stat metadata while altering the generated PDF bytes."""
+
+    GENERATED = b"%PDF-GENERATED"
+    FOREIGN = b"%PDF-USER-EDIT"  # Exactly the same byte length.
+
+    def setUp(self):
+        ExportTests.setUp(self)
+
+    def _edit_without_metadata_change(self):
+        import os
+        from app.documents import export as exp
+
+        self.assertEqual(self.target.read_bytes(), self.GENERATED)
+        before = exp._identity(self.target)
+        info = self.target.stat()
+        self.target.write_bytes(self.FOREIGN)
+        os.utime(self.target, ns=(info.st_atime_ns, info.st_mtime_ns))
+        self.assertEqual(exp._identity(self.target), before)
+        self.assertNotEqual(self.target.read_bytes(), self.GENERATED)
+
+    def test_same_size_and_mtime_edit_before_rollback_preserves_user_pdf(self):
+        self.target.write_bytes(b"OLD")
+        self.service.fail_mark = True
+        original_mark = self.service.mark_document_generated
+
+        def edit_before_conflict(document_id, *, expected_revision):
+            self._edit_without_metadata_change()
+            return original_mark(document_id, expected_revision=expected_revision)
+
+        self.service.mark_document_generated = edit_before_conflict
+        with patch("app.documents.export._RENDERERS",
+                   {"act": lambda _: self.GENERATED}):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True)
+        error = ctx.exception
+        self.assertTrue(error.recovery_failed)
+        self.assertIsInstance(error.__cause__, ValueError)
+        self.assertIn("SHA-256", str(error.recovery_error))
+        self.assertEqual(error.path, self.target)
+        self.assertEqual(self.target.read_bytes(), self.FOREIGN)
+        self.assertEqual(error.backup_path.read_bytes(), b"OLD")
+        self.assertIsNone(error.quarantine_path)
+        self.assertEqual(self.service.marked, [])
+
+    def test_same_size_and_mtime_edit_without_backup_is_not_deleted(self):
+        self.service.fail_mark = True
+        original_mark = self.service.mark_document_generated
+
+        def edit_before_conflict(document_id, *, expected_revision):
+            self._edit_without_metadata_change()
+            return original_mark(document_id, expected_revision=expected_revision)
+
+        self.service.mark_document_generated = edit_before_conflict
+        with patch("app.documents.export._RENDERERS",
+                   {"act": lambda _: self.GENERATED}):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target)
+        self.assertTrue(ctx.exception.recovery_failed)
+        self.assertIsNone(ctx.exception.backup_path)
+        self.assertEqual(ctx.exception.path, self.target)
+        self.assertEqual(self.target.read_bytes(), self.FOREIGN)
+        self.assertEqual(self.service.marked, [])
+
+    def test_same_size_edit_after_precheck_is_detected_in_quarantine(self):
+        import os
+        from app.documents import export as exp
+
+        self.target.write_bytes(b"OLD")
+        self.service.fail_mark = True
+        original_replace = os.replace
+        raced = False
+
+        def edit_just_before_quarantine(source, destination):
+            nonlocal raced
+            if (Path(source) == self.target
+                    and Path(destination).name.startswith(".kontakt-rollback-")
+                    and not raced):
+                self._edit_without_metadata_change()
+                raced = True
+            return original_replace(source, destination)
+
+        with patch("app.documents.export._RENDERERS",
+                   {"act": lambda _: self.GENERATED}), \
+             patch.object(exp.os, "replace", side_effect=edit_just_before_quarantine):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True)
+        error = ctx.exception
+        self.assertTrue(raced)
+        self.assertTrue(error.recovery_failed)
+        self.assertIsInstance(error.__cause__, ValueError)
+        self.assertEqual(error.backup_path.read_bytes(), b"OLD")
+        # The changed file was moved and returned to its original location
+        # using no-clobber publication, not overwritten with the backup.
+        self.assertEqual(self.target.read_bytes(), self.FOREIGN)
+        self.assertEqual(self.service.marked, [])
+
+    def test_checksum_read_failure_before_rollback_preserves_backup(self):
+        from app.documents import export as exp
+
+        self.target.write_bytes(b"OLD")
+        self.service.fail_mark = True
+        original_digest = exp._sha256_file
+
+        def fail_on_target(path):
+            if Path(path) == self.target:
+                raise PermissionError("checksum unavailable")
+            return original_digest(path)
+
+        with patch.object(exp, "_sha256_file", side_effect=fail_on_target), \
+             patch("app.documents.export._RENDERERS",
+                   {"act": lambda _: self.GENERATED}):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True)
+        error = ctx.exception
+        self.assertTrue(error.recovery_failed)
+        self.assertIsInstance(error.__cause__, ValueError)
+        self.assertIsInstance(error.recovery_error, PermissionError)
+        self.assertEqual(self.target.read_bytes(), self.GENERATED)
+        self.assertEqual(error.backup_path.read_bytes(), b"OLD")
+        self.assertEqual(self.service.marked, [])
+
+
+    def test_checksum_read_failure_after_move_preserves_quarantine_and_backup(self):
+        from app.documents import export as exp
+
+        self.target.write_bytes(b"OLD")
+        self.service.fail_mark = True
+        real_digest = exp._sha256_file
+
+        def deny_quarantine_read(path):
+            if Path(path).name.startswith(".kontakt-rollback-"):
+                raise PermissionError("quarantined PDF cannot be read")
+            return real_digest(path)
+
+        with patch.object(exp, "_sha256_file", side_effect=deny_quarantine_read), \
+             patch("app.documents.export._RENDERERS",
+                   {"act": lambda _: self.GENERATED}):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True)
+        err = ctx.exception
+        self.assertTrue(err.recovery_failed)
+        self.assertIsInstance(err.__cause__, ValueError)
+        self.assertIsInstance(err.recovery_error.__cause__, PermissionError)
+        self.assertEqual(err.backup_path.read_bytes(), b"OLD")
+        self.assertEqual(err.quarantine_path.read_bytes(), self.GENERATED)
+        self.assertFalse(self.target.exists())
+        self.assertEqual(self.service.marked, [])
+
+    def test_staged_file_edit_does_not_become_trusted_baseline(self):
+        import os
+
+        self.target.write_bytes(b"OLD")
+        self.service.fail_mark = True
+
+        def corrupt_stage_before_publication():
+            staged = list(self.target.parent.glob(".kontakt-pdf-*.tmp"))
+            self.assertEqual(len(staged), 1)
+            path = staged[0]
+            info = path.stat()
+            self.assertEqual(path.read_bytes(), self.GENERATED)
+            path.write_bytes(self.FOREIGN)
+            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+        with patch("app.documents.export._RENDERERS",
+                   {"act": lambda _: self.GENERATED}):
+            with self.assertRaises(ExportError) as ctx:
+                export_document(self.service, 5, "act", self.target, overwrite=True,
+                                _pre_publish=corrupt_stage_before_publication)
+        err = ctx.exception
+        self.assertTrue(err.recovery_failed)
+        self.assertEqual(self.target.read_bytes(), self.FOREIGN)
+        self.assertEqual(err.backup_path.read_bytes(), b"OLD")
+        self.assertIsInstance(err.__cause__, ValueError)
+        self.assertEqual(self.service.marked, [])
+
+
 class ReviewRenderRegressionTests(unittest.TestCase):
     def test_very_long_real_table_cells_split_without_losing_text(self):
         for kind, renderer, fields in (
