@@ -6,7 +6,7 @@ import sqlite3
 from decimal import Decimal
 from functools import wraps
 
-from PySide6.QtCore import QDate, Qt, QLocale, QTimer, QEvent
+from PySide6.QtCore import QDate, Qt, QLocale, QTimer
 from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDateEdit, QFrame, QHBoxLayout, QLabel,
@@ -152,6 +152,11 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(790, 540)
         self.setStyleSheet(THEME)
         apply_appearance()
+        # Owned by this window: a small follow-up fit happens after Windows
+        # has settled the nested scroll-area and native font geometry.
+        self._post_layout_fit_timer = QTimer(self)
+        self._post_layout_fit_timer.setSingleShot(True)
+        self._post_layout_fit_timer.timeout.connect(self._fit_calculation_columns)
         self._build()
         apply_appearance()
         self._refresh_all()
@@ -322,9 +327,6 @@ class MainWindow(QMainWindow):
         self._calc_fit_scheduled = False
         self.calc_table.horizontalHeader().setMinimumSectionSize(58)
         self.calc_table.horizontalHeader().sectionResized.connect(self._calculation_column_resized)
-        # A scroll page can change the table width without resizing MainWindow.
-        # Observe the *real* viewport to keep initial fit correct on Windows.
-        self.calc_table.viewport().installEventFilter(self)
         self.calc_table.doubleClicked.connect(lambda _index: self.open_selected_calculation())
         self.calc_table.setToolTip("Двойной щелчок — открыть расчёт; PDF — в последнем столбце")
         contents.addWidget(self.calc_table, 1)
@@ -508,14 +510,6 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         self._schedule_calculation_fit()
 
-    def eventFilter(self, watched, event) -> bool:
-        if (hasattr(self, "calc_table")
-                and watched is self.calc_table.viewport()
-                and event.type() == QEvent.Type.Resize
-                and event.size().width() != event.oldSize().width()):
-            self._schedule_calculation_fit()
-        return super().eventFilter(watched, event)
-
     def _calculation_column_resized(self, column: int, old: int, new: int) -> None:
         if old != new and not self._calc_fitting_columns:
             # Header dragging makes the layout manual until Reset is pressed.
@@ -531,6 +525,9 @@ class MainWindow(QMainWindow):
             return
         self._calc_fit_scheduled = True
         QTimer.singleShot(0, self._run_scheduled_calculation_fit)
+        # A second, debounced fit uses the final scroll-area viewport width,
+        # which can change after the first Qt event processing pass on Windows.
+        self._post_layout_fit_timer.start(45)
 
     def _run_scheduled_calculation_fit(self) -> None:
         self._calc_fit_scheduled = False
@@ -586,8 +583,6 @@ class MainWindow(QMainWindow):
         finally:
             self._calc_fitting_columns = False
         self._resize_calculation_rows()
-        if table.viewport().width() != viewport_width:
-            self._schedule_calculation_fit()
 
     def _resize_calculation_rows(self) -> None:
         table = self.calc_table
