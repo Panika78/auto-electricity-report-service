@@ -936,11 +936,30 @@ class SettingsPage(QWidget):
             label.setText(Path(path).name if path else "Не загружено")
             label.setToolTip(str(path or ""))
             remove.setEnabled(bool(path))
-        settings = appearance_settings()
-        for widget, key, fallback in ((self.size_picker, "font_size", "standard"),
-                                      (self.weight_picker, "font_weight", "normal")):
-            index = widget.findData(settings.value(key, fallback))
-            widget.setCurrentIndex(index if index >= 0 else widget.findData(fallback))
+            preview = self.image_previews[key]
+            if path:
+                picture = QPixmap(str(path))
+                if not picture.isNull():
+                    preview.setPixmap(picture.scaled(
+                        150, 75, Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation))
+                    preview.setToolTip(str(path))
+                else:
+                    preview.setPixmap(QPixmap())
+                    preview.setText("Изображение недоступно")
+            else:
+                preview.setPixmap(QPixmap())
+                preview.setText("Не загружено")
+        size, weight = read_appearance()
+        self.size_slider.blockSignals(True)
+        self.weight_slider.blockSignals(True)
+        try:
+            self.size_slider.setValue(size)
+            self.weight_slider.setValue(weight)
+        finally:
+            self.size_slider.blockSignals(False)
+            self.weight_slider.blockSignals(False)
+        self._update_appearance_labels()
         self._filling = False
 
     @guard_database_errors("Ошибка базы данных")
@@ -1016,16 +1035,65 @@ class SettingsPage(QWidget):
                 QMessageBox.warning(self, "Очистка изображения",
                                     "Ссылка удалена, но файл остался: " + str(error))
 
-    def _change_appearance(self, key: str, value: str) -> None:
-        if self._filling or value is None:
+    def _update_appearance_labels(self) -> None:
+        size, weight = read_appearance()
+        self.size_value.setText(f"{size}%")
+        self.weight_value.setText(str(weight))
+        available = available_font_weights()
+        effective = effective_font_weight(weight, available)
+        if effective == weight:
+            self.weight_effective.setText(
+                f"Выбрано начертание {effective}. Доступные веса текущего шрифта: "
+                + ", ".join(map(str, available)) + ".")
+        else:
+            self.weight_effective.setText(
+                f"Запрошено {weight}; системный шрифт предоставляет ближайшее "
+                f"начертание {effective}. Доступно: "
+                + ", ".join(map(str, available)) + ".")
+
+    def _change_appearance(self, key: str, value: int) -> None:
+        if self._filling or key not in ("font_size_percent", "font_weight_value"):
+            return
+        number = int(value)
+        if key == "font_size_percent" and not (80 <= number <= 200 and number % 5 == 0):
+            return
+        if key == "font_weight_value" and not (300 <= number <= 800 and number % 100 == 0):
             return
         settings = appearance_settings()
-        settings.setValue(key, value)
+        settings.setValue(key, number)
         settings.sync()
         if settings.status() != type(settings).Status.NoError:
             QMessageBox.warning(self, "Оформление", "Не удалось сохранить настройку оформления.")
         apply_appearance()
+        self._update_appearance_labels()
         self.note.setText("Оформление применено. Статус документов не изменён.")
+        parent = self.window()
+        if hasattr(parent, "_reflow_layouts"):
+            parent._reflow_layouts()
+
+    def _reset_appearance(self) -> None:
+        if self._filling:
+            return
+        settings = appearance_settings()
+        settings.setValue("font_size_percent", 100)
+        settings.setValue("font_weight_value", 400)
+        settings.sync()
+        if settings.status() != type(settings).Status.NoError:
+            QMessageBox.warning(self, "Оформление", "Не удалось сохранить настройку оформления.")
+        self.size_slider.blockSignals(True)
+        self.weight_slider.blockSignals(True)
+        try:
+            self.size_slider.setValue(100)
+            self.weight_slider.setValue(400)
+        finally:
+            self.size_slider.blockSignals(False)
+            self.weight_slider.blockSignals(False)
+        apply_appearance()
+        self._update_appearance_labels()
+        self.note.setText("Восстановлено стандартное оформление: 100% / 400.")
+        parent = self.window()
+        if hasattr(parent, "_reflow_layouts"):
+            parent._reflow_layouts()
 
 
 class ExportDialog(QDialog):
