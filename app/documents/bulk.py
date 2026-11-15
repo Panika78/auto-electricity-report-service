@@ -18,7 +18,7 @@ from app.core.service import CalculationService
 
 from .export import (
     _INVALID_WINDOWS, _RENDERERS, _RESERVED_WINDOWS, _identity,
-    _publish_new_file, _unlink_if_owned, ExportError, safe_filename,
+    _publish_new_file, _sha256_file, _unlink_if_owned, ExportError, safe_filename,
 )
 
 
@@ -99,6 +99,15 @@ def _validate_target(target: Path, overwrite: bool) -> None:
         raise FileExistsError(f"ZIP уже существует: {target}")
 
 
+def _file_fingerprint(path: Path) -> tuple[tuple[int, ...], bytes]:
+    """Best-effort detect foreign changes, including same-size replacement."""
+    identity = _identity(path)
+    digest = _sha256_file(path)
+    if _identity(path) != identity:
+        raise ExportError("Архив изменился при чтении; перезапись запрещена.", path=path)
+    return identity, digest
+
+
 def _stage_zip(target: Path, documents: list[tuple[str, bytes]]) -> tuple[Path, tuple[int, int]]:
     """Write and fsync a private sibling ZIP; clean up a failed stage by identity."""
     fd, name = tempfile.mkstemp(prefix=".kontakt-zip-", suffix=".tmp", dir=target.parent)
@@ -141,6 +150,9 @@ def export_bulk_zip(service: CalculationService, year: int, month: int,
         raise ValueError("Выберите акт, счёт или оба вида документов без повторов.")
     target = Path(path).expanduser().absolute()
     _validate_target(target, overwrite)  # preflight before any document reservation
+    if overwrite and not target.exists():
+        raise FileNotFoundError("Исходный ZIP для замены больше не существует.")
+    old_fingerprint = _file_fingerprint(target) if overwrite else None
     candidates = service.bulk_candidates(year, month)
     result = BulkExportResult(skipped=list(candidates["skipped"]))
     prepared: list[tuple[str, bytes]] = []
@@ -188,10 +200,19 @@ def export_bulk_zip(service: CalculationService, year: int, month: int,
 
     stage: Path | None = None
     stage_identity: tuple[int, int] | None = None
+    staged_digest: bytes | None = None
     try:
         stage, stage_identity = _stage_zip(target, prepared)
+        stage_stat, staged_digest = _file_fingerprint(stage)
+        if stage_stat[:2] != stage_identity:
+            raise ExportError("Временный ZIP был заменён до публикации.", staged_path=stage)
         _validate_target(target, overwrite)  # re-check after rendering
         if overwrite:
+            # A second actor could edit the existing ZIP after confirmation.
+            # Never knowingly overwrite different bytes; the final rename
+            # still has an unavoidable race with uncoordinated processes.
+            if _file_fingerprint(target) != old_fingerprint:
+                raise ExportError("Существующий ZIP изменился; замена отменена.", path=target)
             # Atomic replacement on the same filesystem; an old ZIP remains
             # unchanged if construction or os.replace fails.
             os.replace(stage, target)
@@ -219,6 +240,12 @@ def export_bulk_zip(service: CalculationService, year: int, month: int,
 
     if result.path is not None:
         try:
+            # A foreign process may replace or modify the published archive.
+            # Never assert "formed" if its bytes are no longer our ZIP.
+            if _sha256_file(target) != staged_digest:
+                raise ExportError(
+                    "Опубликованный ZIP изменился до записи статусов; отметки не обновлены.",
+                    path=target)
             service.mark_documents_generated(revisions, require_active=True)
         except Exception as exc:
             # Crucial: do not delete the already published ZIP or claim its
