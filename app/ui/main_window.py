@@ -519,66 +519,158 @@ class MainWindow(QMainWindow):
     def refresh_calculations(self) -> None:
         with self.database.connection() as conn:
             calculations = db.list_calculations(conn, year=self.year, month=self.month)
-            tenants = {t["id"]: t for t in db.list_tenants(conn, include_archived=True)}
+            tenants_list = db.list_tenants(conn, include_archived=True)
+            tenants = {t["id"]: t for t in tenants_list}
             tariff = queries.month_tariff(conn, self.year, self.month)
             documents = db.list_documents(conn)
+        self.period_title.setText(month_label(self.year, self.month))
         self.tariff_input.blockSignals(True)
         if not self.tariff_input.hasFocus():
             self.tariff_input.setText(show_number(tariff["rate"] if tariff else None))
         self.tariff_input.blockSignals(False)
+
         docs = {(d["calculation_id"], d["type"]): d for d in documents}
-        self.calc_table.setRowCount(0)
-        ready_count, generated_count = 0, 0
-        q = self.calc_search.text().casefold().strip()
-        selection = self.calc_filter.currentIndex()
+        rate = tariff["rate"] if tariff else None
+
+        def doc_label(doc):
+            if not doc or not doc["last_generated_at"]:
+                return "Не сформирован"
+            return "Сформирован" if doc["is_current"] else "Обновить"
+
+        data = []
+        ready_active, active_total, generated_both = 0, 0, 0
+        amount_ready = Decimal("0")
+        stale_docs = 0
         for calc in calculations:
             tenant = tenants.get(calc["tenant_id"], {})
-            name = tenant.get("name", f"ID {calc['tenant_id']}")
-            checked = validate_calculation(calc, tariff["rate"] if tariff else None)
-            act = docs.get((calc["id"], "act"))
-            invoice = docs.get((calc["id"], "invoice"))
-            def doc_label(doc):
-                if not doc or not doc["last_generated_at"]:
-                    return "Не сформирован"
-                return "Сформирован" if doc["is_current"] else "Обновить"
-            a, i = doc_label(act), doc_label(invoice)
-            if checked.ready:
-                ready_count += 1
-            if a == i == "Сформирован":
-                generated_count += 1
-            if q and q not in name.casefold() and q not in str(calc["id"]) and q not in tenant.get("inn", ""):
+            checked = validate_calculation(calc, rate)
+            a = doc_label(docs.get((calc["id"], "act")))
+            invoice = doc_label(docs.get((calc["id"], "invoice")))
+            archived = bool(tenant.get("is_archived"))
+            if not archived:
+                active_total += 1
+                if checked.ready:
+                    ready_active += 1
+                    if calc["total_amount"] is not None:
+                        amount_ready += Decimal(str(calc["total_amount"]))
+                if a == invoice == "Сформирован":
+                    generated_both += 1
+                stale_docs += int(a == "Обновить") + int(invoice == "Обновить")
+            data.append((calc, tenant, checked, a, invoice))
+
+        active_count = sum(not t["is_archived"] for t in tenants_list)
+        self.kpi_cards["active"].value.setText(str(active_count))
+        self.kpi_cards["ready"].value.setText(f"{ready_active} / {active_total}")
+        self.kpi_cards["total"].value.setText(display_number(amount_ready, 2, "₽"))
+        self.kpi_cards["stale"].value.setText(str(stale_docs))
+        self.summary.setText(
+            f"Тариф: {display_number(rate, 4, '₽/кВт·ч') if rate is not None else 'не задан'}"
+            f" · {len(calculations)} расчётов за месяц · {generated_both} комплектов документов"
+            " · одна строка — один расчёт")
+
+        q = self.calc_search.text().casefold().strip()
+        selection = self.calc_filter.currentIndex()
+        visible = []
+        for calc, tenant, checked, act, invoice in data:
+            searchable = " ".join((
+                str(tenant.get("name", "")),
+                str(tenant.get("inn") or ""),
+                str(tenant.get("contract_number") or ""),
+                str(calc["id"]),
+            )).casefold()
+            if q and q not in searchable:
                 continue
             if selection == 1 and not checked.ready or selection == 2 and checked.ready:
                 continue
-            if selection == 3 and a != "Не сформирован" and i != "Не сформирован":
+            if selection == 3 and act != "Не сформирован" and invoice != "Не сформирован":
                 continue
-            if selection == 4 and a != "Обновить" and i != "Обновить":
+            if selection == 4 and act != "Обновить" and invoice != "Обновить":
                 continue
-            if selection == 5 and (a != "Сформирован" or i != "Сформирован"):
+            if selection == 5 and (act != "Сформирован" or invoice != "Сформирован"):
                 continue
-            row = self.calc_table.rowCount()
-            self.calc_table.insertRow(row)
-            values = [calc["id"], name, f"{calc['period_start']} — {calc['period_end']}",
-                      show_number(calc["start_reading"]), show_number(calc["end_reading"]),
-                      show_number(calc["consumption"]),
-                      show_number(tariff["rate"] if tariff else None),
-                      show_number(calc["total_amount"]),
-                      "Готов" if checked.ready else "Не готов: " + (checked.errors[0] if checked.errors else "неполные данные"), a, i]
-            for column, value in enumerate(values):
-                tooltip = "; ".join(checked.errors + checked.warnings) if column == 8 else ""
-                if column == 1 and tenant.get("is_archived"):
-                    tooltip = "Арендатор находится в архиве"
-                color = ""
-                if column == 8:
-                    color = "ok" if checked.ready else "bad"
-                elif column in (9, 10):
-                    color = "ok" if value == "Сформирован" else "warn" if value == "Обновить" else "neutral"
-                self.calc_table.setItem(row, column, item(value, tooltip=tooltip, kind=color))
-        self.summary.setText(
-            f"За {self.month:02d}.{self.year}: расчётов — {len(calculations)}  ·  "
-            f"готовы — {ready_count}  ·  комплект документов — {generated_count}  ·  "
-            f"тариф: {show_number(tariff['rate']) if tariff else 'не задан'}")
-        self.calc_table.resizeRowsToContents()
+            visible.append((calc, tenant, checked, act, invoice))
+        sort = self.calc_sort.currentIndex()
+        if sort == 1:
+            visible.sort(key=lambda x: (str(x[0]["updated_at"]), x[0]["id"]), reverse=True)
+        elif sort == 2:
+            visible.sort(key=lambda x: (
+                Decimal(str(x[0]["total_amount"])) if x[0]["total_amount"] is not None
+                else Decimal("-Infinity"), x[0]["id"]), reverse=True)
+        else:
+            visible.sort(key=lambda x: (str(x[1].get("name", "")).casefold(), -x[0]["id"]))
+
+        selected = self.calc_table.currentRow()
+        previously_selected = None
+        if selected >= 0 and self.calc_table.item(selected, 0):
+            previously_selected = self.calc_table.item(selected, 0).data(Qt.ItemDataRole.UserRole)
+        self.calc_table.setUpdatesEnabled(False)
+        try:
+            self.calc_table.setRowCount(0)
+            for calc, tenant, checked, act, invoice in visible:
+                row = self.calc_table.rowCount()
+                self.calc_table.insertRow(row)
+                self.calc_table.setRowHeight(row, max(63, self.fontMetrics().height() * 3 + 12))
+                tenant_name = tenant.get("name") or f"Арендатор {calc['tenant_id']}"
+                contract = tenant.get("contract_number") or "не указан"
+                contract_text = f"Договор {contract}"
+                if tenant.get("is_archived"):
+                    contract_text += " · архив"
+                name_item = item(tenant_name, tooltip=tenant_name + "\n" + contract_text)
+                name_item.setData(Qt.ItemDataRole.UserRole, calc["id"])
+                name_item.setData(META_ROLE, contract_text)
+                self.calc_table.setItem(row, 0, name_item)
+
+                period = russian_date(calc["period_start"]) + "\n" + russian_date(calc["period_end"])
+                fields = (
+                    period, display_number(calc["start_reading"], 3),
+                    display_number(calc["end_reading"], 3),
+                    display_number(calc["consumption"], 3), display_number(rate, 4),
+                    display_number(calc["total_amount"], 2),
+                )
+                for offset, val in enumerate(fields, start=1):
+                    entry = item(val, tooltip=val.replace("\n", " — "))
+                    entry.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                        if offset >= 2 else Qt.AlignmentFlag.AlignCenter)
+                    self.calc_table.setItem(row, offset, entry)
+                warning = "; ".join(checked.errors + checked.warnings)
+                status_label = "Готов" if checked.ready else "Не готов"
+                for col, label, tone, tooltip in (
+                    (7, status_label, "ok" if checked.ready else "bad",
+                     warning or "Данные расчёта проверены"),
+                    (8, act, "ok" if act == "Сформирован" else
+                     "warn" if act == "Обновить" else "neutral", act),
+                    (9, invoice, "ok" if invoice == "Сформирован" else
+                     "warn" if invoice == "Обновить" else "neutral", invoice),
+                ):
+                    entry = item(label, tooltip=tooltip)
+                    entry.setData(TONE_ROLE, tone)
+                    self.calc_table.setItem(row, col, entry)
+
+                actions = QWidget()
+                action_bar = QHBoxLayout(actions)
+                action_bar.setContentsMargins(4, 4, 4, 4)
+                action_bar.setSpacing(5)
+                edit = QPushButton("Открыть")
+                edit.setToolTip("Открыть расчёт и изменить показания")
+                edit.clicked.connect(
+                    lambda _=False, identifier=calc["id"]: self._open_calculation_id(identifier))
+                pdf = QPushButton("PDF")
+                pdf.setToolTip("Экспорт акта, счёта или обоих документов")
+                pdf.clicked.connect(
+                    lambda _=False, identifier=calc["id"]: self._export_calculation_id(identifier))
+                action_bar.addWidget(edit)
+                action_bar.addWidget(pdf)
+                self.calc_table.setCellWidget(row, 10, actions)
+                if calc["id"] == previously_selected:
+                    self.calc_table.selectRow(row)
+        finally:
+            self.calc_table.setUpdatesEnabled(True)
+        self.calc_footer.setText(
+            f"Показано {len(visible)} из {len(calculations)} расчётов · "
+            "Данные сохраняются после изменения поля · "
+            "Наведите на статус «Не готов», чтобы увидеть причину.")
+        self._reflow_layouts()
 
     @database_error_dialog
     def refresh_tenants(self, archived: bool = False) -> None:
@@ -586,29 +678,53 @@ class MainWindow(QMainWindow):
         search = self.archive_search if archived else self.tenant_search
         with self.database.connection() as conn:
             tenants = db.list_tenants(conn, include_archived=True)
+        active_count = sum(not x["is_archived"] for x in tenants)
+        archived_count = len(tenants) - active_count
+        self.nav_buttons["archive"].setText(f"▧  Архив ({archived_count})")
+        self.tenant_count.setText(f"{active_count} активных · {archived_count} в архиве")
+        self.archive_count.setText(f"{active_count} активных · {archived_count} в архиве")
+
+        self._clear_tenant_cards(archived)
         listing.setRowCount(0)
-        for tenant in tenants:
+        text = search.text().casefold().strip()
+        cards = []
+        for tenant in sorted(tenants, key=lambda x: x["name"].casefold()):
             if bool(tenant["is_archived"]) != archived:
                 continue
-            if search.text().casefold() not in (tenant["name"] + tenant["inn"]).casefold():
+            searchable = " ".join((tenant["name"], tenant["inn"] or "",
+                                   tenant["contract_number"] or "")).casefold()
+            if text not in searchable:
                 continue
             row = listing.rowCount()
             listing.insertRow(row)
-            values = [tenant["id"], tenant["name"], tenant["inn"],
-                      tenant["contract_number"], show_number(tenant["initial_reading"]),
-                      tenant["updated_at"]]
-            for col, value in enumerate(values):
-                listing.setItem(row, col, item(value))
-        listing.resizeRowsToContents()
-        self.nav_buttons["archive"].setText(
-            f"▧  Архив ({sum(1 for t in tenants if t['is_archived'])})")
+            listing.setItem(row, 0, item(tenant["id"]))
+            identifier = tenant["id"]
+            card = TenantCard(
+                tenant, archived=archived,
+                open_card=lambda _=False, tid=identifier: self._open_tenant_id(tid),
+                open_history=lambda _=False, tid=identifier: self._open_tenant_history(tid),
+                toggle_archive=lambda _=False, tid=identifier, old=archived:
+                    self._toggle_archive_id(tid, old),
+                parent=self.archive_cards_host if archived else self.tenant_cards_host)
+            cards.append(card)
+        if archived:
+            self._archive_cards = cards
+            self.archive_empty.setText("В архиве нет арендаторов." if not cards else "")
+        else:
+            self._tenant_cards = cards
+            self.tenant_empty.setText(
+                "Пока нет арендаторов. Добавьте первую карточку."
+                if not cards and not text else
+                "Совпадений не найдено. Измените условия поиска." if not cards else "")
+        self._relayout_tenant_cards(archived)
 
     def selected_id(self, listing: QTableWidget) -> int | None:
         selected = listing.currentRow()
         if selected < 0 or listing.item(selected, 0) is None:
             QMessageBox.information(self, "Выберите запись", "Сначала выделите строку таблицы.")
             return None
-        return int(listing.item(selected, 0).text())
+        stored = listing.item(selected, 0).data(Qt.ItemDataRole.UserRole)
+        return int(stored if stored is not None else listing.item(selected, 0).text())
 
     @database_error_dialog
     def new_calculation(self) -> None:
