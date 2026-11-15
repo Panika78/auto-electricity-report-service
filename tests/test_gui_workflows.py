@@ -998,6 +998,29 @@ class NativeWorkflowTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_typical_calculation_table_starts_fitted_at_1360_px(self):
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QDate
+        from app.ui.main_window import MainWindow
+        tenant = self._tenant(contract_number="Д-2026/1")
+        self.service.set_tariff(2026, 10, "5")
+        self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="100", end_reading="120")
+        window = MainWindow(self.database)
+        try:
+            window.resize(1360, 820)
+            window.show()
+            window.period_picker.setDate(QDate(2026, 10, 1))
+            QApplication.processEvents()
+            table = window.calc_table
+            self.assertTrue(window._calc_columns_auto)
+            self.assertGreater(table.viewport().width(), 700)
+            self.assertLessEqual(
+                sum(table.columnWidth(i) for i in range(table.columnCount())),
+                table.viewport().width() + 4)
+        finally:
+            window.close()
+
     def test_calculation_table_fits_window_until_manual_resize_then_reset(self):
         from PySide6.QtWidgets import QApplication, QHeaderView
         from PySide6.QtCore import QDate
