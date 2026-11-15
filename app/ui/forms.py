@@ -546,8 +546,6 @@ class CalculationDialog(QDialog):
         control = QPushButton(label)
         symbol = {
             "Карточка арендатора": "tenants",
-            "Ручной расход": "edit",
-            "Ручная сумма": "edit",
             "PDF акта / счёта": "file",
             "Удалить": "trash",
             "Создать расчёт": "plus",
@@ -930,32 +928,6 @@ class CalculationDialog(QDialog):
             self._refresh()
 
     @guard_database_errors("Ошибка базы данных")
-    def _manual(self, field: str, label: str, places: int) -> None:
-        if self.pending:
-            QMessageBox.warning(self, label, "Сначала сохраните или исправьте незавершённые поля.")
-            return
-        if self.calculation_id is None:
-            QMessageBox.information(self, label, "Сначала создайте расчёт.")
-            return
-        from PySide6.QtWidgets import QInputDialog
-        current = self.service.get_calculation(self.calculation_id)
-        value, ok = QInputDialog.getText(self, label,
-                                         f"{label} — новое значение:",
-                                         QLineEdit.EchoMode.Normal,
-                                         show_number(current[field]))
-        if not ok:
-            return
-        try:
-            number = parse_number(value, places)
-        except (ValueError, TypeError) as error:
-            show_error(self, error, "Некорректное число")
-            return
-        result = run_confirmed(self, lambda flags: self.service.update_calculation(
-            self.calculation_id, **{field: number}, **flags))
-        if result is not CANCELLED:
-            self._refresh()
-
-    @guard_database_errors("Ошибка базы данных")
     def _open_tenant(self) -> None:
         """Navigate directly from a calculation to its tenant and full history."""
         if self.pending:
@@ -974,12 +946,6 @@ class CalculationDialog(QDialog):
             self._refresh()
         except (sqlite3.Error, OSError, LookupError, RuntimeError) as error:
             show_error(self, error, "Не удалось открыть арендатора")
-
-    def _edit_consumption(self) -> None:
-        self._manual("consumption", "Ручной расход", 3)
-
-    def _edit_amount(self) -> None:
-        self._manual("total_amount", "Ручная сумма", 2)
 
     @guard_database_errors("Ошибка базы данных")
     def _export(self) -> None:
@@ -1004,6 +970,8 @@ class CalculationDialog(QDialog):
     def accept(self) -> None:
         if self.calculation_id is None and (
             self.start_edit.text().strip() or self.end_edit.text().strip()
+            or self.manual_consumption_check.isChecked()
+            or self.manual_amount_check.isChecked()
         ):
             if QMessageBox.question(self, "Несозданный расчёт",
                                     "Расчёт ещё не создан. Закрыть и потерять введённые данные?",
