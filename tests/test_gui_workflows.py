@@ -1134,6 +1134,193 @@ class NativeWorkflowTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_live_preview_reacts_to_readings_and_inline_manual_checkboxes(self):
+        from app.ui.forms import CalculationDialog
+        from app.data import database as db
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5.7500")
+        dialog = CalculationDialog(self.service, self.database, year=2026, month=10)
+        try:
+            self.assertEqual(dialog.tenant_picker.currentData(), tenant["id"])
+            self.assertEqual(dialog.preview_status.text(), "Черновик")
+            self.assertFalse(dialog.manual_amount_check.isChecked())
+            self.assertFalse(dialog.manual_consumption_check.isChecked())
+            self.assertFalse(dialog.manual_amount_edit.isEnabled())
+            self.assertFalse(dialog.manual_consumption_edit.isEnabled())
+            dialog.start_edit.setText("100")
+            dialog.end_edit.setText("135")
+            self.assertEqual(dialog.consumption.text(), "35 кВт·ч")
+            self.assertEqual(dialog.tariff_label.text(), "5,75 ₽")
+            self.assertEqual(dialog.amount.text(), "201,25 ₽")
+            self.assertEqual(dialog.preview_status.text(), "Готов")
+            dialog.manual_amount_check.setChecked(True)
+            self.assertTrue(dialog.manual_amount_edit.isEnabled())
+            self.assertEqual(dialog.manual_amount_edit.text(), "201,25")
+            dialog.manual_amount_edit.setText("250,50")
+            self.assertEqual(dialog.amount.text(), "250,50 ₽")
+            dialog.manual_amount_check.setChecked(False)
+            self.assertFalse(dialog.manual_amount_edit.isEnabled())
+            self.assertEqual(dialog.amount.text(), "201,25 ₽")
+            dialog.manual_consumption_check.setChecked(True)
+            dialog.manual_consumption_edit.setText("40,125")
+            self.assertEqual(dialog.consumption.text(), "40,125 кВт·ч")
+            self.assertEqual(dialog.amount.text(), "230,72 ₽")
+            dialog.manual_consumption_check.setChecked(False)
+            self.assertEqual(dialog.amount.text(), "201,25 ₽")
+            dialog.end_edit.setText("90")
+            self.assertEqual(dialog.preview_status.text(), "Черновик")
+            self.assertIn("меньше начального", dialog.preview_details.text())
+            dialog.end_edit.setText("invalid")
+            self.assertEqual(dialog.preview_status.text(), "Некорректный ввод")
+            with self.database.connection() as conn:
+                self.assertEqual(db.list_calculations(conn), [])
+        finally:
+            dialog.close()
+
+    def test_manual_amount_checkbox_saves_and_unchecking_resets_formula(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import CalculationDialog
+        from app.data import database as db
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="10", end_reading="20")
+        with self.database.transaction() as conn:
+            db.create_document(conn, calculation_id=calc["id"], type="act",
+                               number=1, document_date="2026-10-31",
+                               last_generated_at="2026-11-01T00:00:00",
+                               is_current=True)
+        editor = CalculationDialog(self.service, self.database, calculation_id=calc["id"])
+        try:
+            self.assertEqual(editor.amount.text(), "50,00 ₽")
+            editor.manual_amount_check.setChecked(True)
+            editor.manual_amount_edit.setText("75,25")
+            editor._mark_pending("total_amount")
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.Yes) as question:
+                editor._save_manual("total_amount")
+                question.assert_called_once()
+            changed = self.service.get_calculation(calc["id"])
+            self.assertEqual(str(changed["total_amount"]), "75.25")
+            self.assertTrue(changed["manual_amount"])
+            self.assertTrue(editor.manual_amount_check.isChecked())
+            self.assertEqual(editor.amount.text(), "75,25 ₽")
+            with self.database.connection() as conn:
+                self.assertFalse(db.list_documents(conn, calculation_id=calc["id"])[0]["is_current"])
+            editor.manual_amount_check.setChecked(False)
+            restored = self.service.get_calculation(calc["id"])
+            self.assertFalse(restored["manual_amount"])
+            self.assertEqual(str(restored["total_amount"]), "50.00")
+            self.assertFalse(editor.manual_amount_edit.isEnabled())
+            self.assertEqual(editor.amount.text(), "50,00 ₽")
+            reopened = CalculationDialog(
+                self.service, self.database, calculation_id=calc["id"])
+            self.assertFalse(reopened.manual_amount_check.isChecked())
+            reopened.close()
+        finally:
+            editor.close()
+
+    def test_manual_consumption_resets_amount_and_cancel_preserves_draft(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import CalculationDialog
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="10", end_reading="20")
+        editor = CalculationDialog(self.service, self.database, calculation_id=calc["id"])
+        try:
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.Yes):
+                editor.manual_amount_check.setChecked(True)
+                editor.manual_amount_edit.setText("75")
+                editor._mark_pending("total_amount")
+                editor._save_manual("total_amount")
+                self.assertTrue(self.service.get_calculation(calc["id"])["manual_amount"])
+                editor.manual_consumption_check.setChecked(True)
+                editor.manual_consumption_edit.setText("12")
+                editor._mark_pending("consumption")
+                editor._save_manual("consumption")
+            data = self.service.get_calculation(calc["id"])
+            self.assertTrue(data["manual_consumption"])
+            self.assertFalse(data["manual_amount"])
+            self.assertEqual(str(data["total_amount"]), "60.00")
+            self.assertTrue(editor.manual_consumption_check.isChecked())
+            self.assertFalse(editor.manual_amount_check.isChecked())
+            # Rejected manual edit must not change SQLite or discard input.
+            editor.manual_amount_check.setChecked(True)
+            editor.manual_amount_edit.setText("120")
+            editor._mark_pending("total_amount")
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.No):
+                editor._save_manual("total_amount")
+            self.assertIn("total_amount", editor.pending)
+            self.assertEqual(editor.manual_amount_edit.text(), "120")
+            self.assertEqual(str(self.service.get_calculation(calc["id"])["total_amount"]), "60.00")
+            editor.manual_amount_check.setChecked(False)
+            self.assertNotIn("total_amount", editor.pending)
+            editor.manual_consumption_check.setChecked(False)
+            original = self.service.get_calculation(calc["id"])
+            self.assertFalse(original["manual_consumption"])
+            self.assertEqual(str(original["consumption"]), "10.000")
+            self.assertEqual(str(original["total_amount"]), "50.00")
+        finally:
+            editor.close()
+
+    def test_create_with_inline_manual_values_uses_existing_service_confirmations(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import CalculationDialog
+        self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        editor = CalculationDialog(self.service, self.database, year=2026, month=10)
+        try:
+            editor.start_edit.setText("10")
+            editor.end_edit.setText("20")
+            editor.manual_consumption_check.setChecked(True)
+            editor.manual_consumption_edit.setText("14")
+            editor.manual_amount_check.setChecked(True)
+            editor.manual_amount_edit.setText("90")
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.Yes) as question:
+                editor._create()
+                self.assertGreaterEqual(question.call_count, 2)
+            self.assertIsInstance(editor.calculation_id, int)
+            saved = self.service.get_calculation(editor.calculation_id)
+            self.assertTrue(saved["manual_consumption"])
+            self.assertTrue(saved["manual_amount"])
+            self.assertEqual(str(saved["consumption"]), "14.000")
+            self.assertEqual(str(saved["total_amount"]), "90.00")
+            self.assertFalse(editor.pending)
+            self.assertEqual(editor.amount.text(), "90,00 ₽")
+        finally:
+            editor.close()
+
+    def test_failed_manual_reset_keeps_checkbox_and_stored_amount(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import CalculationDialog
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="10", end_reading="20")
+        editor = CalculationDialog(self.service, self.database, calculation_id=calc["id"])
+        try:
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.Yes):
+                editor.manual_amount_check.setChecked(True)
+                editor.manual_amount_edit.setText("85")
+                editor._mark_pending("total_amount")
+                editor._save_manual("total_amount")
+            with mock.patch.object(self.database, "transaction",
+                                   side_effect=sqlite3.OperationalError("database is locked")), \
+                 mock.patch.object(QMessageBox, "critical") as critical:
+                editor.manual_amount_check.setChecked(False)
+                critical.assert_called_once()
+            self.assertTrue(editor.manual_amount_check.isChecked())
+            self.assertTrue(editor.manual_amount_edit.isEnabled())
+            self.assertTrue(self.service.get_calculation(calc["id"])["manual_amount"])
+            self.assertEqual(str(self.service.get_calculation(calc["id"])["total_amount"]), "85.00")
+        finally:
+            editor.close()
+
     def test_200_percent_layout_keeps_pages_cards_and_dialog_actions_accessible(self):
         from PySide6.QtCore import QDate, QSettings
         from PySide6.QtWidgets import QApplication, QScrollArea, QPushButton
