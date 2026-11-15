@@ -747,13 +747,19 @@ class CalculationDialog(QDialog):
     def _create(self) -> None:
         tenant_id = self.tenant_picker.currentData()
         if tenant_id is None:
-            QMessageBox.warning(self, "Арендатор отсутствует", "Сначала создайте арендатора в справочнике.")
+            QMessageBox.warning(self, "Арендатор отсутствует",
+                                "Сначала создайте арендатора в справочнике.")
             return
         try:
             start = parse_number(self.start_edit.text(), 3, optional=True)
             end = parse_number(self.end_edit.text(), 3, optional=True)
+            # Reject invalid manual drafts before creating a partial record.
+            if self.manual_consumption_check.isChecked():
+                parse_number(self.manual_consumption_edit.text(), 3)
+            if self.manual_amount_check.isChecked():
+                parse_number(self.manual_amount_edit.text(), 2)
         except (TypeError, ValueError) as error:
-            show_error(self, error)
+            show_error(self, error, "Некорректный ввод расчёта")
             return
         result = run_confirmed(self, lambda flags: self.service.create_calculation(
             tenant_id, self.year, self.month,
@@ -762,33 +768,58 @@ class CalculationDialog(QDialog):
             start_reading=start, end_reading=end, **flags))
         if result is CANCELLED:
             return
+        manual_drafts = [
+            key for key, checked in (
+                ("consumption", self.manual_consumption_check.isChecked()),
+                ("total_amount", self.manual_amount_check.isChecked()),
+            ) if checked
+        ]
         self.calculation_id = result["id"]
         self.tenant_picker.setEnabled(False)
         self.create_button.hide()
         self.delete_button.show()
         self.pending.clear()
+        self.pending.update(manual_drafts)
         self._refresh()
-        self.status.setText("Расчёт создан и сохранён. Дальнейшие изменения сохраняются автоматически.")
+        for field in manual_drafts:
+            if field == "total_amount" and "consumption" in self.pending:
+                # Never calculate the final override using a consumption
+                # correction that the user has not confirmed/saved.
+                break
+            self._save_manual(field)
+        if self.pending:
+            self.status.setText(
+                "Расчёт создан, но ручные корректировки ещё не сохранены. "
+                "Завершите ввод и подтвердите изменения.")
+        else:
+            self.status.setText(
+                "Расчёт создан и сохранён. Дальнейшие изменения сохраняются автоматически.")
 
     @guard_database_errors("Ошибка загрузки расчёта")
     def _refresh(self) -> None:
-        # Read all database state before mutating form widgets. A locked DB must
-        # not partially overwrite unsaved user input or strand _filling=True.
+        """Read everything first; keep unsaved fields after a failed operation."""
         unsaved = set(self.pending)
-        unsaved_start = self.start_edit.text()
-        unsaved_end = self.end_edit.text()
+        unsaved_start, unsaved_end = self.start_edit.text(), self.end_edit.text()
         unsaved_dates = (self.date_start.date(), self.date_end.date())
-        calc = None
-        checked = None
+        unsaved_manual = {
+            key: (checkbox.isChecked(), field.text())
+            for key, checkbox, field in (
+                ("consumption", self.manual_consumption_check, self.manual_consumption_edit),
+                ("total_amount", self.manual_amount_check, self.manual_amount_edit),
+            )
+        }
+        calc = checked = None
         if self.calculation_id is not None:
             calc = self.service.get_calculation(self.calculation_id)
             checked = self.service.validate(self.calculation_id)
         with self.database.connection() as conn:
             tariff = queries.month_tariff(conn, self.year, self.month)
+        self._loaded_calculation = calc
+        self._current_tariff = tariff["rate"] if tariff else None
         self._filling = True
         try:
-            self.create_button.setVisible(self.calculation_id is None)
-            self.delete_button.setVisible(self.calculation_id is not None)
+            self.create_button.setVisible(calc is None)
+            self.delete_button.setVisible(calc is not None)
             if calc is not None:
                 index = self.tenant_picker.findData(calc["tenant_id"])
                 self.tenant_picker.setCurrentIndex(index)
@@ -797,21 +828,36 @@ class CalculationDialog(QDialog):
                 self.date_end.setDate(QDate.fromString(calc["period_end"], "yyyy-MM-dd"))
                 self.start_edit.setText(show_number(calc["start_reading"]))
                 self.end_edit.setText(show_number(calc["end_reading"]))
-                self.consumption.setText(show_number(calc["consumption"]))
-                self.amount.setText(show_number(calc["total_amount"]))
                 details = checked.warnings + checked.errors
-                self.status.setText(("Готов к экспорту" if checked.ready else "Черновик") +
-                                    ("\n" + "\n".join(details) if details else ""))
-                self.start_hint.setText(
-                    {"manual": "Введено вручную", "previous_month": "Из предыдущего месяца",
-                     "initial": "Из карточки арендатора", "unspecified": "Источник не задан"}.get(
-                        calc["start_reading_source"], ""))
+                self.status.setText(
+                    ("Готов к экспорту" if checked.ready else "Черновик") +
+                    ("\n" + "\n".join(details) if details else ""))
+                self.start_hint.setText({
+                    "manual": "Начальные показания введены вручную.",
+                    "previous_month": "Из предыдущего месяца.",
+                    "initial": "Из карточки арендатора.",
+                    "unspecified": "Источник начальных показаний не задан.",
+                }.get(calc["start_reading_source"], ""))
             else:
-                self.consumption.setText("")
-                self.amount.setText("")
-                self.status.setText("Новый расчёт будет сохранён как черновик, даже без конечного показания.")
-                self._suggest_start()
-            self.tariff_label.setText(show_number(tariff["rate"]) if tariff else "Не установлен")
+                self.status.setText(
+                    "Новый расчёт будет сохранён как черновик, "
+                    "даже если конечное показание ещё не указано.")
+
+            for key, flag, checkbox, editor in (
+                ("consumption", "manual_consumption",
+                 self.manual_consumption_check, self.manual_consumption_edit),
+                ("total_amount", "manual_amount",
+                 self.manual_amount_check, self.manual_amount_edit),
+            ):
+                enabled = bool(calc and calc[flag])
+                checkbox.setChecked(enabled)
+                editor.setEnabled(enabled)
+                editor.setText(show_number(calc[key]) if enabled else "")
+                if key in unsaved:
+                    pending_checked, pending_text = unsaved_manual[key]
+                    checkbox.setChecked(pending_checked)
+                    editor.setEnabled(pending_checked)
+                    editor.setText(pending_text)
             if calc is not None and unsaved:
                 if "start_reading" in unsaved:
                     self.start_edit.setText(unsaved_start)
@@ -821,9 +867,13 @@ class CalculationDialog(QDialog):
                     self.date_start.setDate(unsaved_dates[0])
                     self.date_end.setDate(unsaved_dates[1])
                 self.status.setText(
-                    self.status.text() + "\nЕсть несохранённые изменения: " + ", ".join(sorted(unsaved)))
+                    self.status.text() +
+                    "\nЕсть несохранённые изменения: " + ", ".join(sorted(unsaved)))
         finally:
             self._filling = False
+        if calc is None:
+            self._suggest_start()
+        self._update_preview()
 
     @guard_database_errors("Ошибка базы данных")
     def _save_reading(self, key: str) -> None:
