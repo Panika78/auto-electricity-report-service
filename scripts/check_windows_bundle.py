@@ -5,6 +5,7 @@ Windows CI is Windows Server, not a substitute for Windows 10/11 manual tests.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import os
 import shutil
@@ -73,7 +74,9 @@ def check_bundle(dist: Path) -> None:
                 )
             if not expected_database.is_file():
                 raise AssertionError("Frozen EXE did not create the default LOCALAPPDATA SQLite file.")
-            with sqlite3.connect(expected_database) as connection:
+            # sqlite3.Connection.__exit__ commits but does NOT close the handle.
+            # On Windows that prevents deleting the disposable test profile.
+            with closing(sqlite3.connect(expected_database)) as connection:
                 if connection.execute("SELECT count(*) FROM tenants").fetchone()[0] != 1:
                     raise AssertionError("Tenant record lost between distribution replacements.")
                 if connection.execute("SELECT count(*) FROM documents").fetchone()[0] != 2:
