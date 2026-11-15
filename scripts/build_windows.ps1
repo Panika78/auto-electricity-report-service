@@ -55,8 +55,34 @@ try {
         }
     }
     $leaks = @(Get-ChildItem -LiteralPath $bundle -File -Recurse | Where-Object {
-        $_.Name -match '(?i)\.(db|sqlite|sqlite3|pdf|zip|bak|backup|tmp|log)$' -or
-        $_.Name -match '(?i)^(signature|stamp)[-_.]'
+        # PyInstaller needs exactly _internal/base_library.zip for Python stdlib.
+        # Every other ZIP (including user exports) remains forbidden.
+        $knownRuntimeZip = ($_.Name -ceq "base_library.zip" -and
+                            $_.DirectoryName -eq (Join-Path $bundle "_internal"))
+        ($_.Name -match '(?i)\.(db|sqlite|sqlite3|pdf|bak|backup|tmp|log)
+    if ($leaks.Count -ne 0) {
+        throw "В дистрибутиве обнаружены подозрительные пользовательские файлы: $($leaks.FullName -join ', ')"
+    }
+
+    & $pythonExe scripts/check_windows_bundle.py --dist $bundle
+    if ($LASTEXITCODE -ne 0) { throw "Проверка собранного .exe завершилась с ошибкой." }
+
+    $zip = Join-Path $root "dist\kontakt-windows-x64.zip"
+    if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+    Compress-Archive -LiteralPath $bundle -DestinationPath $zip -CompressionLevel Optimal
+    if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
+        throw "ZIP дистрибутива не создан."
+    }
+    & $pythonExe -m pip freeze | Out-File -FilePath "dist\build-requirements.txt" -Encoding utf8
+    if ($LASTEXITCODE -ne 0) { throw "Не удалось сохранить версии зависимостей." }
+    Get-FileHash -LiteralPath $zip -Algorithm SHA256 | Format-List
+    Write-Host "Готовая поставка: $zip"
+} finally {
+    Pop-Location
+}
+) -or
+        (($_.Extension -ieq ".zip") -and -not $knownRuntimeZip) -or
+        ($_.Name -match '(?i)^(signature|stamp)[-_.]')
     })
     if ($leaks.Count -ne 0) {
         throw "В дистрибутиве обнаружены подозрительные пользовательские файлы: $($leaks.FullName -join ', ')"
