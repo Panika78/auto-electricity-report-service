@@ -533,6 +533,74 @@ class BulkQtTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_dialog_does_not_claim_success_for_changed_or_deleted_zip(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from app.ui.forms import BulkExportDialog
+        from app.documents import bulk
+        tenant = self.service.create_tenant(name="Проверка сообщения")
+        cid = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="10", end_reading="15")["id"]
+        for delete in (False, True):
+            with self.subTest(delete=delete):
+                dialog = BulkExportDialog(self.service, 2026, 10)
+                dialog.invoice_check.setChecked(False)
+                target = Path(self.tmp.name) / ("removed.zip" if delete else "modified.zip")
+                original = bulk._publish_new_zip
+
+                def interfere(stage, destination):
+                    moved = original(stage, destination)
+                    if delete:
+                        destination.unlink()
+                    else:
+                        destination.write_bytes(b"INVALID ZIP CONTENT")
+                    return moved
+
+                try:
+                    with mock.patch.object(QFileDialog, "getSaveFileName",
+                                           return_value=(str(target), "ZIP (*.zip)")), \
+                         mock.patch.object(QMessageBox, "warning") as warning, \
+                         mock.patch.object(QMessageBox, "information") as information, \
+                         mock.patch.object(bulk, "_publish_new_zip",
+                                           side_effect=interfere):
+                        dialog._export()
+                    warning.assert_called_once()
+                    report = warning.call_args.args[2]
+                    self.assertIn("содержимое ZIP после публикации НЕ подтверждено", report)
+                    self.assertIn("статусы документов не обновлены", report)
+                    self.assertNotIn("ZIP сохранён:", report)
+                    self.assertNotIn("PDF в архиве:", report)
+                    self.assertNotIn("Выгружены:", report)
+                    information.assert_not_called()
+                    self.assertEqual(dialog.result(), 0)
+                    self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+                finally:
+                    dialog.close()
+
+    def test_dialog_distinguishes_valid_zip_with_failed_sqlite_commit(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from app.ui.forms import BulkExportDialog
+        dialog = BulkExportDialog(self.service, 2026, 10)
+        self.service.create_calculation(
+            self.service.create_tenant(name="Ошибка статуса")["id"],
+            2026, 10, start_reading="10", end_reading="15")
+        target = Path(self.tmp.name) / "valid-but-unconfirmed.zip"
+        try:
+            with mock.patch.object(QFileDialog, "getSaveFileName",
+                                   return_value=(str(target), "ZIP (*.zip)")), \
+                 mock.patch.object(QMessageBox, "warning") as warning, \
+                 mock.patch.object(self.service, "mark_documents_generated",
+                                   side_effect=sqlite3.OperationalError("locked")):
+                dialog._export()
+            warning.assert_called_once()
+            report = warning.call_args.args[2]
+            self.assertIn("ZIP сохранён:", report)
+            self.assertIn("статусы документов в базе НЕ подтверждены", report)
+            self.assertNotIn("содержимое ZIP после публикации НЕ подтверждено", report)
+            with zipfile.ZipFile(target) as archive:
+                self.assertEqual(len(archive.namelist()), 2)
+        finally:
+            dialog.close()
+
     def test_dialog_selects_one_type_and_publishes_real_zip(self):
         from PySide6.QtWidgets import QFileDialog, QMessageBox
         from app.ui.forms import BulkExportDialog
