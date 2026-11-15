@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from app.data import database as db
 from app.data.database import get_database_path
+from app.qa_profile import validate_qa_profile
 from app.core.calculations import decimal_value
 from app.core.service import ConfirmationRequired
 from app.documents import ExportError
@@ -124,12 +125,7 @@ def appearance_settings() -> QSettings:
     # dedicated INI under the explicitly isolated synthetic profile instead.
     # Ordinary users keep the existing native Qt settings without migration.
     if os.environ.get("KONTAKT_RELEASE_SMOKE") == "1":
-        selected = os.environ.get("KONTAKT_SMOKE_ROOT")
-        if not selected:
-            raise RuntimeError("Для release-проверки требуется отдельный тестовый профиль.")
-        root = Path(selected).expanduser().resolve()
-        if not root.is_dir() or get_database_path() != root / "ElectricityReports" / "app.db":
-            raise RuntimeError("Профиль настроек не соответствует тестовой базе; проверка прервана.")
+        root = validate_qa_profile()
         settings = QSettings(str(root / "qa-appearance.ini"), QSettings.Format.IniFormat)
         settings.setFallbacksEnabled(False)
         return settings
