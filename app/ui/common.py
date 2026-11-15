@@ -13,6 +13,7 @@ from PySide6.QtCore import QSettings
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
+from app.data import database as db
 from app.data.database import get_database_path
 from app.core.calculations import decimal_value
 from app.core.service import ConfirmationRequired
@@ -203,18 +204,19 @@ def apply_appearance() -> None:
 
 
 
-def image_directory() -> Path:
-    """Managed images live alongside SQLite, not in Qt's unrelated app directory.
+def image_directory(database: db.Database | None = None) -> Path:
+    """Keep images beside the SQLite database used by this UI/service.
 
-    Existing absolute image paths stored in SQLite remain readable after upgrade.
-    No migration/deletion of previously imported files is attempted here.
+    Existing absolute image references remain readable; do not migrate/delete
+    files on an upgrade. Passing the explicit Database isolates test profiles.
     """
-    path = get_database_path().parent / "images"
+    db_path = database.path if database is not None else get_database_path()
+    path = db_path.parent / "images"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def import_image(source: str, kind: str) -> Path:
+def import_image(source: str, kind: str, *, database: db.Database | None = None) -> Path:
     """Copy image into app data, without exposing an external removable path."""
     if kind not in ("signature", "stamp"):
         raise ValueError("Недопустимый тип изображения.")
@@ -225,7 +227,7 @@ def import_image(source: str, kind: str) -> Path:
     reader = QImageReader(str(path))
     if not reader.canRead() or reader.read().isNull():
         raise ValueError("Изображение повреждено или не поддерживается.")
-    directory = image_directory()
+    directory = image_directory(database)
     fd, tmp = tempfile.mkstemp(prefix=".upload-", dir=directory)
     os.close(fd)
     try:
@@ -240,14 +242,14 @@ def import_image(source: str, kind: str) -> Path:
             os.unlink(tmp)
 
 
-def remove_managed_image(path: str | None) -> None:
+def remove_managed_image(path: str | None, *, database: db.Database | None = None) -> None:
     """Remove only image copies located in our own application directory."""
     if not path:
         return
     target = Path(path)
     if target.is_symlink():
         raise OSError("Ссылка на файл не удалена из соображений безопасности.")
-    base = image_directory().resolve()
+    base = image_directory(database).resolve()
     if target.resolve().parent != base:
         return  # old externally referenced file belongs to the user
     if target.name.startswith(("signature-", "stamp-")):
