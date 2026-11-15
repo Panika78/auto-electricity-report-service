@@ -134,6 +134,15 @@ class BulkZipTests(unittest.TestCase):
         self.assertEqual(self.service.document_status(cid, "act"), "current")
         self.assertEqual(self.service.document_status(cid, "invoice"), "not_created")
 
+    def test_missing_performer_name_blocks_pdf_as_in_individual_ui(self):
+        cid = self.calc(self.tenant())
+        self.service.update_settings(performer_name="")
+        result = export_bulk_zip(self.service, 2026, 10, self.root / "no-performer.zip")
+        self.assertEqual(len(result.failed), 2)
+        self.assertTrue(all("исполнителя" in str(item.error) for item in result.failed))
+        self.assertFalse((self.root / "no-performer.zip").exists())
+        self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+
     def test_all_renderers_fail_does_not_publish_empty_zip_or_mark_success(self):
         cid = self.calc(self.tenant())
         from app.documents import bulk
@@ -368,6 +377,28 @@ class BulkQtTests(unittest.TestCase):
                 dialog._export()
             warning.assert_called_once()
             picker.assert_not_called()
+        finally:
+            dialog.close()
+
+    def test_existing_zip_cannot_be_overwritten_without_confirmation(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from app.ui.forms import BulkExportDialog
+        tenant = self.service.create_tenant(name="Синтетический GUI")
+        cid = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="10", end_reading="15")["id"]
+        target = Path(self.tmp.name) / "previous.zip"
+        target.write_bytes(b"PREVIOUS FILE")
+        dialog = BulkExportDialog(self.service, 2026, 10)
+        try:
+            with mock.patch.object(QFileDialog, "getSaveFileName",
+                                   return_value=(str(target), "ZIP (*.zip)")), \
+                 mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.No) as question:
+                dialog._export()
+            question.assert_called_once()
+            self.assertEqual(target.read_bytes(), b"PREVIOUS FILE")
+            with self.database.connection() as conn:
+                self.assertEqual(db.list_documents(conn, calculation_id=cid), [])
         finally:
             dialog.close()
 
