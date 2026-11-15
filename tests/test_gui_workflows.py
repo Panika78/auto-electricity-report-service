@@ -949,7 +949,7 @@ class NativeWorkflowTests(unittest.TestCase):
             window.calc_search.clear()
             window.calc_sort.setCurrentIndex(2)  # descending amount
             self.assertEqual(window.calc_table.item(0, 0).text(), long_name)
-            self.assertFalse(window.bulk_action.isEnabled())
+            self.assertTrue(window.bulk_action.isEnabled())
         finally:
             window.close()
 
@@ -1180,7 +1180,7 @@ class NativeWorkflowTests(unittest.TestCase):
             window.navigate("calculations")
             self.assertFalse(window.bulk_action.icon().isNull())
             self.assertFalse(window.fit_columns_button.icon().isNull())
-            self.assertFalse(window.bulk_action.isEnabled())
+            self.assertTrue(window.bulk_action.isEnabled())
         finally:
             window.close()
 
@@ -1639,7 +1639,7 @@ class NativeWorkflowTests(unittest.TestCase):
                 self.assertEqual(window.kpi_layout.count(), 4)
                 self.assertEqual(window.calc_table.rowCount(), 1)
                 self.assertIsNotNone(window.calc_table.cellWidget(0, 10))
-                self.assertFalse(window.bulk_action.isEnabled())
+                self.assertTrue(window.bulk_action.isEnabled())
                 window.navigate("tenants")
                 self.assertEqual(len(window._tenant_cards), 1)
                 card = window._tenant_cards[0]
