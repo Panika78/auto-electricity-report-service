@@ -962,6 +962,59 @@ class NativeWorkflowTests(unittest.TestCase):
                 page.close()
         apply_appearance()
 
+    def test_200_percent_layout_keeps_pages_cards_and_dialog_actions_accessible(self):
+        from PySide6.QtCore import QDate, QSettings
+        from PySide6.QtWidgets import QApplication, QScrollArea, QPushButton
+        from app.ui.main_window import MainWindow
+        from app.ui.forms import CalculationDialog, ExportDialog
+        from app.ui.common import apply_appearance
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="10", end_reading="20")
+        private = QSettings(str(Path(self.dir.name) / "scaled.ini"), QSettings.Format.IniFormat)
+        private.clear()
+        with mock.patch("app.ui.common.appearance_settings", return_value=private), \
+             mock.patch("app.ui.forms.appearance_settings", return_value=private):
+            window = MainWindow(self.database)
+            detail = export = None
+            try:
+                window.show()
+                window.resize(790, 590)
+                window.period_picker.setDate(QDate(2026, 10, 1))
+                page = window.settings_page
+                page.size_slider.setValue(200)
+                page.weight_slider.setValue(800)
+                QApplication.processEvents()
+                self.assertEqual(window.pages.count(), 4)
+                self.assertTrue(all(isinstance(window.pages.widget(i), QScrollArea)
+                                    for i in range(4)))
+                self.assertEqual(window.kpi_layout.count(), 4)
+                self.assertEqual(window.calc_table.rowCount(), 1)
+                self.assertIsNotNone(window.calc_table.cellWidget(0, 10))
+                self.assertFalse(window.bulk_action.isEnabled())
+                window.navigate("tenants")
+                self.assertEqual(len(window._tenant_cards), 1)
+                card = window._tenant_cards[0]
+                self.assertEqual(len(card.findChildren(QPushButton)), 3)
+                self.assertTrue(all(control.isEnabled()
+                                    for control in card.findChildren(QPushButton)))
+                detail = CalculationDialog(
+                    self.service, self.database, calculation_id=calc["id"])
+                self.assertTrue(detail.findChildren(QScrollArea))
+                self.assertTrue(detail.open_tenant_button.isEnabled())
+                export = ExportDialog(self.service, self.database, calc["id"])
+                self.assertTrue(export.findChildren(QScrollArea))
+                self.assertEqual(export.options["act"][0].isChecked(), True)
+                page._reset_appearance()
+            finally:
+                if detail is not None:
+                    detail.close()
+                if export is not None:
+                    export.close()
+                window.close()
+        apply_appearance()
+
     def test_headless_export_negative_cases_exit_in_separate_processes(self):
         root = Path(__file__).resolve().parent.parent
         environment = os.environ.copy()
