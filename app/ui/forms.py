@@ -351,6 +351,8 @@ class CalculationDialog(QDialog):
         self._loaded_calculation = None
         self._current_tariff = None
         self._start_proposal = None
+        self._start_is_suggestion = True
+        self._suggested_start_text = ""
         self.setWindowTitle("Расчёт электроэнергии")
         self.resize(780, 720)
         outer = QVBoxLayout(self)
@@ -395,7 +397,7 @@ class CalculationDialog(QDialog):
         period_form.setSpacing(11)
         self.tenant_picker = QComboBox()
         self._load_tenants()
-        self.tenant_picker.currentIndexChanged.connect(self._suggest_start)
+        self.tenant_picker.currentIndexChanged.connect(self._tenant_changed)
         period_form.addRow("Арендатор", self.tenant_picker)
         date_start = QDate(self.year, self.month, 1)
         date_end = QDate(self.year, self.month, calendar.monthrange(self.year, self.month)[1])
@@ -430,7 +432,7 @@ class CalculationDialog(QDialog):
         self.start_hint.setWordWrap(True)
         readings_group.addWidget(self.start_hint)
         for name, field in (("start_reading", self.start_edit), ("end_reading", self.end_edit)):
-            field.textEdited.connect(lambda _v, key=name: self._mark_pending(key))
+            field.textEdited.connect(lambda _v, key=name: self._reading_edited(key))
             field.editingFinished.connect(lambda key=name: self._save_reading(key))
 
         corrections = section(
@@ -571,6 +573,21 @@ class CalculationDialog(QDialog):
             self.pending.add(name)
             self.status.setText("Есть ещё не сохранённые изменения поля.")
 
+    def _reading_edited(self, name: str) -> None:
+        if name == "start_reading" and self.calculation_id is None:
+            # Typing in the suggested start makes it an explicit manual value.
+            self._start_is_suggestion = False
+        self._mark_pending(name)
+
+    def _tenant_changed(self, *_ignored) -> None:
+        if self.calculation_id is not None:
+            return
+        # The previous tenant's initial reading must never become the new
+        # tenant's manually typed reading. HTML similarly resets the source.
+        self._start_is_suggestion = True
+        self.start_edit.clear()
+        self._suggest_start()
+
     @guard_database_errors("Ошибка базы данных")
     def _suggest_start(self) -> None:
         if self.calculation_id is not None or self.tenant_picker.currentData() is None:
@@ -580,14 +597,18 @@ class CalculationDialog(QDialog):
                 self.tenant_picker.currentData(), self.year, self.month,
                 self.date_start.date().toString("yyyy-MM-dd"))
             self._start_proposal = proposal
+            suggested = show_number(proposal.value)
+            self._suggested_start_text = suggested
+            if self._start_is_suggestion:
+                self.start_edit.setText(suggested)
             if proposal.value is None:
                 self.start_hint.setText(
                     "Автоматический источник не найден. Укажите показание вручную.")
             else:
                 suffix = " (потребуется подтверждение)" if proposal.requires_confirmation else ""
                 self.start_hint.setText(
-                    "Автоподстановка при создании: " + show_number(proposal.value)
-                    + suffix + ". Начальные показания можно изменить вручную.")
+                    "Автоподстановка: " + suggested + suffix
+                    + ". Начальные показания можно изменить вручную.")
         except (LookupError, ValueError) as error:
             self._start_proposal = None
             self.start_hint.setText(str(error))
@@ -739,6 +760,11 @@ class CalculationDialog(QDialog):
             return
         try:
             start = parse_number(self.start_edit.text(), 3, optional=True)
+            # A displayed automatic proposal stays automatic in the service.
+            # Explicitly edited values keep their manual source, even if equal.
+            if (self._start_is_suggestion
+                    and self.start_edit.text().strip() == self._suggested_start_text):
+                start = None
             end = parse_number(self.end_edit.text(), 3, optional=True)
             # Reject invalid manual drafts before creating a partial record.
             if self.manual_consumption_check.isChecked():
