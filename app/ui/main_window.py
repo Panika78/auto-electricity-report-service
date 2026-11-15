@@ -6,7 +6,7 @@ import sqlite3
 from decimal import Decimal
 from functools import wraps
 
-from PySide6.QtCore import QDate, Qt, QLocale
+from PySide6.QtCore import QDate, Qt, QLocale, QTimer
 from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDateEdit, QFrame, QHBoxLayout, QLabel,
@@ -23,7 +23,7 @@ from app.ui.common import CANCELLED, apply_appearance, parse_number, run_confirm
 from app.ui.forms import CalculationDialog, ExportDialog, SettingsPage, TenantDialog
 from app.ui.widgets import (BoltIcon, CompanyDelegate, ChipDelegate, META_ROLE, TONE_ROLE,
                             MetricCard, TenantCard, display_number,
-                            month_label, russian_date)
+                            month_label, russian_date, interface_icon, icon_button)
 
 
 THEME = """
@@ -33,8 +33,6 @@ QFrame#panel, QFrame#metricCard, QFrame#tenantCard, QFrame#formCard,
 QFrame#previewCard {background: #fffefa; border: 1px solid #dfe2df; border-radius: 14px;}
 QFrame#metricCard {border: 1px solid #e6e7e2;}
 QFrame#tenantCard:hover {border: 1px solid #d3a28c;}
-QFrame#helpStrip {background: #f0eee7; border-left: 3px solid #c55e3c;
-                  border-radius: 8px; color: #3b5051;}
 QFrame#sidebar QPushButton {background: transparent; border: none; border-radius: 9px;
   color: #b7c7c7; text-align: left; padding: 12px;}
 QFrame#sidebar QPushButton:hover {background: #304248; color: #ffffff;}
@@ -70,9 +68,12 @@ QSlider::handle:horizontal:focus {border-color: #263a3f;}
 """
 
 
-def button(label: str, callback, *, primary: bool = False) -> QPushButton:
+def button(label: str, callback, *, primary: bool = False,
+           icon: str | None = None) -> QPushButton:
     control = QPushButton(label)
     control.setProperty("primary", primary)
+    if icon:
+        icon_button(control, icon, light=primary)
     control.clicked.connect(callback)
     return control
 
@@ -184,18 +185,19 @@ class MainWindow(QMainWindow):
         hint.setStyleSheet("color:#9bb1b2; font-size:10px; padding-bottom:19px;")
         nav_layout.addWidget(hint)
         self.nav_buttons = {}
-        for page, label in (("calculations", "▦  Расчёты"), ("tenants", "▤  Арендаторы"),
-                            ("archive", "▧  Архив"), ("settings", "⚙  Настройки")):
+        for page, label, symbol in (
+            ("calculations", "Расчёты", "dashboard"),
+            ("tenants", "Арендаторы", "tenants"),
+            ("settings", "Настройки", "settings"),
+        ):
             control = QPushButton(label)
+            icon_button(control, symbol, light=True)
             control.setCheckable(True)
-            control.setAccessibleName(label.strip())
+            control.setAccessibleName(label)
             control.clicked.connect(lambda _=False, key=page: self.navigate(key))
             nav_layout.addWidget(control)
             self.nav_buttons[page] = control
         nav_layout.addStretch()
-        foot = QLabel("●  Локальные данные\nБез интернета и аккаунта")
-        foot.setStyleSheet("color:#9db6b2; padding:10px;")
-        nav_layout.addWidget(foot)
         layout.addWidget(sidebar)
 
         self.pages = QStackedWidget()
@@ -248,6 +250,7 @@ class MainWindow(QMainWindow):
         monthbar.addWidget(button("›", lambda: self.shift_month(1)))
         monthbar.addStretch()
         self.bulk_action = QPushButton("Выгрузить всех · ZIP")
+        icon_button(self.bulk_action, "download")
         self.bulk_action.setEnabled(False)
         self.bulk_action.setToolTip("Массовый экспорт станет доступен после issue #5")
         monthbar.addWidget(self.bulk_action)
@@ -287,6 +290,8 @@ class MainWindow(QMainWindow):
 
         self.calc_search = QLineEdit()
         self.calc_search.setPlaceholderText("Поиск по названию, договору или ИНН…")
+        self.calc_search.addAction(interface_icon("search"),
+                                   QLineEdit.ActionPosition.LeadingPosition)
         self.calc_search.textChanged.connect(lambda _text: self.refresh_calculations())
         contents.addWidget(self.calc_search)
         filters = QHBoxLayout()
@@ -300,7 +305,8 @@ class MainWindow(QMainWindow):
         self.calc_sort.addItems(["По названию", "По изменению", "По сумме"])
         self.calc_sort.currentIndexChanged.connect(lambda _index: self.refresh_calculations())
         filters.addWidget(self.calc_sort, 1)
-        filters.addWidget(button("Создать расчёт", self.new_calculation, primary=True))
+        filters.addWidget(button("Создать расчёт", self.new_calculation,
+                                 primary=True, icon="plus"))
         contents.addLayout(filters)
 
         self.calc_table = table([
@@ -316,9 +322,12 @@ class MainWindow(QMainWindow):
         contents.addWidget(self.calc_table, 1)
 
         actions = QHBoxLayout()
-        actions.addWidget(button("Открыть расчёт", self.open_selected_calculation))
-        actions.addWidget(button("Арендатор / история", self.open_tenant_for_selected_calculation))
-        actions.addWidget(button("PDF акта / счёта", self.export_selected_calculation))
+        actions.addWidget(button("Открыть расчёт", self.open_selected_calculation,
+                                 icon="edit"))
+        actions.addWidget(button("Арендатор / история", self.open_tenant_for_selected_calculation,
+                                 icon="history"))
+        actions.addWidget(button("PDF акта / счёта", self.export_selected_calculation,
+                                 icon="file"))
         actions.addStretch()
         contents.addLayout(actions)
         self.calc_footer = QLabel()
@@ -327,20 +336,6 @@ class MainWindow(QMainWindow):
         contents.addWidget(self.calc_footer)
         body.addWidget(frame, 1)
 
-        help_frame = QFrame()
-        help_frame.setObjectName("helpStrip")
-        help_line = QVBoxLayout(help_frame)
-        help_line.setContentsMargins(18, 15, 18, 15)
-        title = QLabel("Как проходит работа")
-        title.setProperty("kontaktHeadingSize", 19)
-        help_line.addWidget(title)
-        explanation = QLabel(
-            "Выберите месяц → задайте тариф → откройте расчёт и внесите показания → "
-            "сформируйте акт, счёт или оба. Причина неготовности указана у расчёта. "
-            "Изменения сохраняются после завершения ввода поля.")
-        explanation.setWordWrap(True)
-        help_line.addWidget(explanation)
-        body.addWidget(help_frame)
         return page
 
     def _build_tenants(self, *, archived: bool) -> QWidget:
@@ -360,10 +355,13 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         if archived:
             header.addWidget(button("К активным арендаторам", lambda: self.navigate("tenants"),
-                                    primary=True))
+                                    primary=True, icon="arrow"))
         else:
-            header.addWidget(button("Открыть архив", lambda: self.navigate("archive")))
-            header.addWidget(button("Добавить арендатора", self.new_tenant, primary=True))
+            self.open_archive_button = button(
+                "Открыть архив", lambda: self.navigate("archive"), icon="archive")
+            header.addWidget(self.open_archive_button)
+            header.addWidget(button("Добавить арендатора", self.new_tenant,
+                                    primary=True, icon="plus"))
         header.addStretch()
         body.addLayout(header)
 
@@ -376,6 +374,8 @@ class MainWindow(QMainWindow):
         inside.addWidget(count)
         search = QLineEdit()
         search.setPlaceholderText("Поиск по названию, ИНН или договору…")
+        search.addAction(interface_icon("search"),
+                         QLineEdit.ActionPosition.LeadingPosition)
         search.textChanged.connect(lambda _t, is_archive=archived: self.refresh_tenants(is_archive))
         inside.addWidget(search)
 
@@ -479,7 +479,8 @@ class MainWindow(QMainWindow):
         names = {"calculations": 0, "tenants": 1, "archive": 2, "settings": 3}
         self.pages.setCurrentIndex(names[page])
         for name, control in self.nav_buttons.items():
-            control.setChecked(name == page)
+            # Archive remains a distinct page, but is reached from Tenants only.
+            control.setChecked(name == ("tenants" if page == "archive" else page))
         if page == "settings":
             self.settings_page.reload()
         elif page in ("tenants", "archive"):
@@ -667,10 +668,12 @@ class MainWindow(QMainWindow):
                 action_bar.setContentsMargins(4, 4, 4, 4)
                 action_bar.setSpacing(5)
                 edit = QPushButton("Открыть")
+                icon_button(edit, "edit")
                 edit.setToolTip("Открыть расчёт и изменить показания")
                 edit.clicked.connect(
                     lambda _=False, identifier=calc["id"]: self._open_calculation_id(identifier))
                 pdf = QPushButton("PDF")
+                icon_button(pdf, "file")
                 pdf.setToolTip("Экспорт акта, счёта или обоих документов")
                 pdf.clicked.connect(
                     lambda _=False, identifier=calc["id"]: self._export_calculation_id(identifier))
@@ -695,7 +698,7 @@ class MainWindow(QMainWindow):
             tenants = db.list_tenants(conn, include_archived=True)
         active_count = sum(not x["is_archived"] for x in tenants)
         archived_count = len(tenants) - active_count
-        self.nav_buttons["archive"].setText(f"▧  Архив ({archived_count})")
+        self.open_archive_button.setText(f"Открыть архив ({archived_count})")
         self.tenant_count.setText(f"{active_count} активных · {archived_count} в архиве")
         self.archive_count.setText(f"{active_count} активных · {archived_count} в архиве")
 
