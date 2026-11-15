@@ -99,7 +99,7 @@ class StatusChip(QLabel):
 
 
 class CompanyDelegate(QStyledItemDelegate):
-    """Two-line company/contract block, with full data in tooltips."""
+    """Full multi-line company and contract without destructive elision."""
     def paint(self, painter: QPainter, option, index):
         painter.save()
         if option.state & QStyle.StateFlag.State_Selected:
@@ -107,23 +107,18 @@ class CompanyDelegate(QStyledItemDelegate):
         rect = option.rect.adjusted(12, 8, -8, -7)
         name = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
         meta = str(index.data(META_ROLE) or "")
-        ink = QColor("#1b2b30")
-        secondary = QColor("#71817f")
-        painter.setPen(ink)
+        wrap = Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap
         font = QFont(option.font)
         font.setBold(True)
         painter.setFont(font)
-        metrics = painter.fontMetrics()
-        width = max(10, rect.width())
-        painter.drawText(rect.left(), rect.top() + metrics.ascent(),
-                         metrics.elidedText(name, Qt.TextElideMode.ElideRight, width))
-        font.setBold(False)
-        painter.setFont(font)
-        painter.setPen(secondary)
-        secondary_metrics = painter.fontMetrics()
-        y = rect.top() + metrics.height() + 4 + secondary_metrics.ascent()
-        painter.drawText(rect.left(), y,
-                         secondary_metrics.elidedText(meta, Qt.TextElideMode.ElideRight, width))
+        main_height = painter.fontMetrics().boundingRect(
+            0, 0, max(10, rect.width()), 10_000, int(Qt.TextFlag.TextWordWrap), name).height()
+        painter.setPen(QColor("#1b2b30"))
+        painter.drawText(rect.left(), rect.top(), rect.width(), main_height, wrap, name)
+        painter.setFont(option.font)
+        painter.setPen(QColor("#71817f"))
+        painter.drawText(rect.left(), rect.top() + main_height + 5,
+                         rect.width(), max(0, rect.height() - main_height - 5), wrap, meta)
         painter.restore()
 
 
@@ -191,16 +186,22 @@ class TenantCard(QFrame):
             block.addWidget(val, 2)
             outer.addLayout(block)
         outer.addStretch()
-        actions = QHBoxLayout()
+        # Two short actions plus a full-width archive action remain usable
+        # under 200% text scaling and on a narrow Windows viewport.
+        actions = QVBoxLayout()
         actions.setSpacing(7)
-        for label, callback in (
-            ("Карточка", open_card), ("История", open_history),
-            ("Восстановить" if archived else "В архив", toggle_archive),
-        ):
+        first_line = QHBoxLayout()
+        first_line.setSpacing(7)
+        for label, callback in (("Карточка", open_card), ("История", open_history)):
             action = QPushButton(label)
             action.setObjectName("cardAction")
-            action.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+            action.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             action.clicked.connect(callback)
-            actions.addWidget(action)
+            first_line.addWidget(action)
+        actions.addLayout(first_line)
+        archive_action = QPushButton("Восстановить" if archived else "В архив")
+        archive_action.setObjectName("cardAction")
+        archive_action.clicked.connect(toggle_archive)
+        actions.addWidget(archive_action)
         outer.addLayout(actions)
         self.setAccessibleName(f"{'Архивный' if archived else 'Активный'} арендатор: {tenant['name']}")
