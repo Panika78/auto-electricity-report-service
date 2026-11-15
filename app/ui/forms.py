@@ -1548,6 +1548,15 @@ class BulkExportDialog(QDialog):
                 kind_label = "Акт" if failure.kind == "act" else "Счёт"
                 lines.append(f"• {failure.tenant_name} — {kind_label}: {explain_error(failure.error)}")
         if result.skipped:
+            # Resolve labels for the report without changing the existing
+            # bulk_candidates() contract. A failed lookup must not hide a ZIP.
+            skipped_names = {}
+            try:
+                with self.service.database.connection() as conn:
+                    skipped_names = {item["tenant_id"]: (db.get_tenant(conn, item["tenant_id"]) or {}).get("name")
+                                     for item in result.skipped}
+            except sqlite3.Error:
+                pass
             lines.append("\nПропущены арендаторы:")
             reasons = {
                 "no_calculation": "нет расчётов за месяц",
@@ -1562,7 +1571,7 @@ class BulkExportDialog(QDialog):
                 details = "; ".join(skipped.get("errors", ()))
                 if details:
                     reason += f" ({details})"
-                lines.append(f'• {skipped["tenant_name"]}: {reason}')
+                lines.append(f'• {skipped_names.get(skipped["tenant_id"]) or "Арендатор #" + str(skipped["tenant_id"])}: {reason}')
         if result.cleanup_errors or result.leftover_staged:
             lines.append("\nВНИМАНИЕ: временные файлы могли остаться на диске.")
             if result.leftover_staged:
