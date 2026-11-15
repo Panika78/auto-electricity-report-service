@@ -7,7 +7,6 @@ must always be built from reviewed source and an isolated clean environment.
 from __future__ import annotations
 
 import argparse
-import re
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -24,7 +23,11 @@ QT_PLUGINS = {"qwindows.dll", "qoffscreen.dll"}
 BINARY_SUFFIXES = {".dll", ".pyd"}
 # Only Qt's immutable runtime data is eligible for non-binary resource types.
 QT_DATA_SUFFIXES = {".qm", ".pak", ".dat", ".rcc"}
-QT_RESOURCE_ROOTS = {("PySide6", "Qt", "translations"), ("PySide6", "Qt", "resources")}
+QT_RESOURCE_ROOTS = {
+    ("PySide6", "translations"),
+    ("PySide6", "Qt", "translations"),
+    ("PySide6", "Qt", "resources"),
+}
 
 
 class UnsafeBundleError(ValueError):
@@ -47,7 +50,8 @@ def _allowed(relative: PurePosixPath) -> bool:
     if relative.suffix.lower() in BINARY_SUFFIXES:
         # PyInstaller's analyzed Python/Qt DLLs and extension modules.
         return True
-    if len(inside) >= 4 and inside[:3] in QT_RESOURCE_ROOTS:
+    if any(inside[:len(prefix)] == prefix and len(inside) > len(prefix)
+           for prefix in QT_RESOURCE_ROOTS):
         return relative.suffix.lower() in QT_DATA_SUFFIXES
     return False
 
