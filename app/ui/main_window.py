@@ -700,7 +700,7 @@ class MainWindow(QMainWindow):
         self.kpi_cards["total"].value.setText(display_number(amount_ready, 2, "₽"))
         self.kpi_cards["stale"].value.setText(str(stale_docs))
         self.summary.setText(
-            f"Тариф: {display_number(rate, 4, '₽/кВт·ч') if rate is not None else 'не задан'}"
+            f"Тариф: {display_number(rate, 4, '₽/кВт·ч', trim=True) if rate is not None else 'не задан'}"
             f" · {len(calculations)} расчётов за месяц · {generated_both} комплектов документов"
             " · одна строка — один расчёт")
 
@@ -765,9 +765,10 @@ class MainWindow(QMainWindow):
 
                 period = russian_date(calc["period_start"]) + "\n" + russian_date(calc["period_end"])
                 fields = (
-                    period, display_number(calc["start_reading"], 3),
-                    display_number(calc["end_reading"], 3),
-                    display_number(calc["consumption"], 3), display_number(rate, 4),
+                    period, display_number(calc["start_reading"], 3, trim=True),
+                    display_number(calc["end_reading"], 3, trim=True),
+                    display_number(calc["consumption"], 3, trim=True),
+                    display_number(rate, 4, trim=True),
                     display_number(calc["total_amount"], 2),
                 )
                 for offset, val in enumerate(fields, start=1):
