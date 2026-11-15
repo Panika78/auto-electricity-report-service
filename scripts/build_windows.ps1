@@ -76,6 +76,26 @@ try {
     if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
         throw "ZIP дистрибутива не создан."
     }
+
+    # Test the actual *delivered ZIP*, not only PyInstaller's working directory.
+    # Extraction into a Unicode path also catches encoding/path packaging bugs.
+    $extractSandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("kontakt-release-" + [guid]::NewGuid().ToString("N"))
+    $extractRoot = Join-Path $extractSandbox "Путь с пробелами и кириллицей"
+    try {
+        New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+        Expand-Archive -LiteralPath $zip -DestinationPath $extractRoot -Force
+        $fromZip = Join-Path $extractRoot "kontakt"
+        if (-not (Test-Path -LiteralPath (Join-Path $fromZip "kontakt.exe") -PathType Leaf)) {
+            throw "После распаковки ZIP ожидается katalog kontakt с kontakt.exe."
+        }
+        & $pythonExe scripts/check_windows_bundle.py --dist $fromZip
+        if ($LASTEXITCODE -ne 0) { throw "Распакованный ZIP не прошёл тест запуска EXE." }
+    } finally {
+        if (Test-Path -LiteralPath $extractSandbox) {
+            Remove-Item -LiteralPath $extractSandbox -Recurse -Force
+        }
+    }
+
     & $pythonExe -m pip freeze | Out-File -FilePath "dist\build-requirements.txt" -Encoding utf8
     if ($LASTEXITCODE -ne 0) { throw "Не удалось сохранить версии зависимостей." }
     Get-FileHash -LiteralPath $zip -Algorithm SHA256 | Format-List
