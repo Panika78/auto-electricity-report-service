@@ -404,6 +404,9 @@ class CalculationDialog(QDialog):
         self.date_start = QDateEdit(date_start)
         self.date_end = QDateEdit(date_end)
         for picker in (self.date_start, self.date_end):
+            # FR-04: the chosen calculation month is authoritative. Native
+            # calendar popup, keyboard input and setDate() all obey this range.
+            picker.setDateRange(date_start, date_end)
             picker.setCalendarPopup(True)
             picker.setDisplayFormat("dd.MM.yyyy")
             picker.userDateChanged.connect(lambda _d: self._save_period())
@@ -759,8 +762,26 @@ class CalculationDialog(QDialog):
         self.pending.discard(field)
         self._refresh()
 
+    def _period_month_message(self) -> str:
+        return (f"Выбран расчётный месяц: {month_label(self.year, self.month).lower()}. "
+                "Укажите даты внутри него.")
+
+    def _period_input_error(self) -> str | None:
+        start = self.date_start.date()
+        end = self.date_end.date()
+        if ((start.year(), start.month()) != (self.year, self.month)
+                or (end.year(), end.month()) != (self.year, self.month)):
+            return self._period_month_message()
+        if start > end:
+            return "Начало периода не может быть позже его окончания."
+        return None
+
     @guard_database_errors("Ошибка базы данных")
     def _create(self) -> None:
+        period_error = self._period_input_error()
+        if period_error is not None:
+            QMessageBox.warning(self, "Расчётный период", period_error)
+            return
         tenant_id = self.tenant_picker.currentData()
         if tenant_id is None:
             QMessageBox.warning(self, "Арендатор отсутствует",
@@ -940,9 +961,9 @@ class CalculationDialog(QDialog):
             self.pending.discard("period")
             return
         self.pending.add("period")
-        if (start > end or start[:7] != f"{self.year:04d}-{self.month:02d}"
-                or end[:7] != f"{self.year:04d}-{self.month:02d}"):
-            self.status.setText("Даты должны находиться в одном месяце, начало не позже конца. Не сохранено.")
+        period_error = self._period_input_error()
+        if period_error is not None:
+            self.status.setText(period_error + " Изменения не сохранены.")
             return
         result = run_confirmed(self, lambda flags: self.service.update_calculation(
             self.calculation_id, **changes, **flags))
@@ -1393,11 +1414,21 @@ class SettingsPage(QWidget):
     def _change_appearance(self, key: str, value: int) -> None:
         if self._filling or key not in ("font_size_percent", "font_weight_value"):
             return
-        number = int(value)
-        if key == "font_size_percent" and not (80 <= number <= 200 and number % 5 == 0):
-            return
-        if key == "font_weight_value" and not (300 <= number <= 800 and number % 100 == 0):
-            return
+        # QSlider.singleStep only controls keyboard steps. Mouse dragging and
+        # setValue() can produce arbitrary integers; snap both visual and
+        # persisted values to the same discrete steps.
+        minimum, maximum, step, slider = {
+            "font_size_percent": (80, 200, 5, self.size_slider),
+            "font_weight_value": (300, 800, 100, self.weight_slider),
+        }[key]
+        bounded = max(minimum, min(maximum, int(value)))
+        number = minimum + ((bounded - minimum + step // 2) // step) * step
+        if slider.value() != number:
+            previous_block = slider.blockSignals(True)
+            try:
+                slider.setValue(number)
+            finally:
+                slider.blockSignals(previous_block)
         settings = appearance_settings()
         settings.setValue(key, number)
         settings.sync()
