@@ -159,6 +159,11 @@ class MainWindow(QMainWindow):
         self._post_layout_fit_timer = QTimer(self)
         self._post_layout_fit_timer.setSingleShot(True)
         self._post_layout_fit_timer.timeout.connect(self._fit_calculation_columns)
+        # Unlike QTimer.singleShot(callable), this callback is cancelled when
+        # the window is destroyed; a delayed fit must never access a dead table.
+        self._immediate_fit_timer = QTimer(self)
+        self._immediate_fit_timer.setSingleShot(True)
+        self._immediate_fit_timer.timeout.connect(self._run_scheduled_calculation_fit)
         self._build()
         apply_appearance()
         self._refresh_all()
@@ -526,7 +531,7 @@ class MainWindow(QMainWindow):
                 or getattr(self, "_calc_fit_scheduled", False)):
             return
         self._calc_fit_scheduled = True
-        QTimer.singleShot(0, self._run_scheduled_calculation_fit)
+        self._immediate_fit_timer.start(0)
         # A second, debounced fit uses the final scroll-area viewport width,
         # which can change after the first Qt event processing pass on Windows.
         self._post_layout_fit_timer.start(45)
