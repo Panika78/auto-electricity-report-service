@@ -585,6 +585,8 @@ class CalculationDialog(QDialog):
         # The previous tenant's initial reading must never become the new
         # tenant's manually typed reading. HTML similarly resets the source.
         self._start_is_suggestion = True
+        self._start_proposal = None
+        self._suggested_start_text = ""
         self.start_edit.clear()
         self._suggest_start()
 
