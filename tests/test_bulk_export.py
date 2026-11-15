@@ -1,0 +1,326 @@
+"""End-to-end Issue #5 tests against synthetic SQLite, real ZIP and PDF bytes."""
+from __future__ import annotations
+
+import errno
+import importlib.util
+import io
+import os
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest import mock
+
+from pypdf import PdfReader
+
+from app.core.service import CalculationService
+from app.data import database as db
+from app.documents import export_bulk_zip
+
+
+class BulkZipTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.database = db.Database(self.root / "synthetic.db")
+        self.database.initialize()
+        self.service = CalculationService(self.database)
+        with self.database.transaction() as conn:
+            db.update_settings(conn, performer_name="ИП Синтетический")
+        self.service.set_tariff(2026, 10, "11.07")
+
+    def tenant(self, name="ООО Вымышленный", *, archived=False):
+        return self.service.create_tenant(name=name, is_archived=archived)["id"]
+
+    def calc(self, tenant_id, start="100", end="110", **kwargs):
+        return self.service.create_calculation(
+            tenant_id, 2026, 10, start_reading=start, end_reading=end, **kwargs)["id"]
+
+    def docs(self, calculation_id):
+        with self.database.connection() as conn:
+            return {d["type"]: d for d in db.list_documents(conn, calculation_id=calculation_id)}
+
+    def entries(self, result):
+        self.assertIsNotNone(result.path)
+        with zipfile.ZipFile(result.path) as z:
+            self.assertIsNone(z.testzip())
+            entries = {name: z.read(name) for name in z.namelist()}
+        self.assertEqual(len(entries), len(result.successful))
+        self.assertEqual(set(entries), {d.entry_name for d in result.successful})
+        for name, content in entries.items():
+            self.assertTrue(content.startswith(b"%PDF-"), name)
+            self.assertTrue(PdfReader(io.BytesIO(content)).pages, name)
+            self.assertEqual(len(name.split("/")), 2)
+            self.assertNotIn("\\", name)
+            self.assertNotIn("..", name.split("/"))
+            self.assertFalse(name.startswith("/"))
+        self.assertEqual(len({name.casefold() for name in entries}), len(entries))
+        return entries
+
+    def test_selects_previous_ready_skips_zero_drafts_missing_and_archived(self):
+        chosen = self.tenant("Синтетический готовый")
+        older = self.calc(chosen, end="120")
+        self.calc(chosen, end=None, confirm_overlap=True)  # newer draft
+        zero = self.tenant("Синтетический ноль")
+        self.calc(zero, end="120")
+        self.calc(zero, end="100", confirm_overlap=True)  # latest ready is zero
+        absent = self.tenant("Синтетический без расчёта")
+        invalid = self.tenant("Синтетический некорректный")
+        self.calc(invalid, start="200", end="100")
+        archived = self.tenant("Синтетический архив", archived=True)
+        self.calc(archived)
+        result = export_bulk_zip(self.service, 2026, 10, self.root / "selected.zip",
+                                 kinds=("invoice",))
+        self.assertTrue(result.statuses_confirmed)
+        self.assertEqual({d.calculation_id for d in result.successful}, {older})
+        self.assertEqual({s["tenant_id"] for s in result.skipped}, {zero, absent, invalid})
+        self.assertEqual({s["reason"] for s in result.skipped},
+                         {"zero_consumption", "no_calculation", "invalid_readings"})
+        content = next(iter(self.entries(result).values()))
+        text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(content)).pages)
+        self.assertIn("Синтетический готовый", text)
+        self.assertNotIn("Синтетический архив", text)
+        self.assertEqual(set(self.docs(older)), {"invoice"})
+
+    def test_missing_tariff_skips_without_creating_zip(self):
+        tenant = self.tenant()
+        self.service.create_calculation(tenant, 2026, 9, start_reading="10", end_reading="20")
+        result = export_bulk_zip(self.service, 2026, 9, self.root / "empty.zip")
+        self.assertFalse(result.successful)
+        self.assertFalse((self.root / "empty.zip").exists())
+        self.assertEqual(result.skipped[0]["reason"], "missing_tariff")
+
+    def test_two_types_collisions_and_stable_numbers_dates_on_repeat(self):
+        a = self.tenant("Одинаковая / компания: <опасное>")
+        b = self.tenant("Одинаковая / компания: <опасное>")
+        ids = [self.calc(a), self.calc(b)]
+        # Explicit manual duplicate is allowed and must not lose either PDF.
+        self.service.reserve_document(ids[0], "act", number=51,
+                                      document_date="2027-01-09")
+        self.service.reserve_document(ids[1], "act", number=51,
+                                      document_date="2027-01-09", confirm_duplicate=True)
+        target = self.root / "first.zip"
+        first = export_bulk_zip(self.service, 2026, 10, target)
+        self.assertEqual(len(first.successful), 4)
+        self.assertEqual(len(self.entries(first)), 4)
+        self.assertFalse(first.failed)
+        before = {cid: self.docs(cid) for cid in ids}
+        second = export_bulk_zip(self.service, 2026, 10, self.root / "second.zip")
+        self.assertEqual(len(self.entries(second)), 4)
+        after = {cid: self.docs(cid) for cid in ids}
+        for cid in ids:
+            self.assertEqual(
+                [(d["id"], d["number"], d["document_date"]) for d in before[cid].values()],
+                [(d["id"], d["number"], d["document_date"]) for d in after[cid].values()])
+            self.assertTrue(all(d["is_current"] and d["last_generated_at"]
+                                for d in after[cid].values()))
+        self.assertEqual({d.number for d in first.successful if d.kind == "act"}, {51})
+        self.assertEqual(len({d.entry_name.split("/")[0].casefold()
+                              for d in first.successful}), 2)
+
+    def test_renderer_fails_for_one_type_without_losing_other(self):
+        cid = self.calc(self.tenant())
+        from app.documents import bulk
+        def broken(_snapshot):
+            raise RuntimeError("Синтетическая ошибка рендера счёта")
+        with mock.patch.dict(bulk._RENDERERS, {"invoice": broken}):
+            result = export_bulk_zip(self.service, 2026, 10, self.root / "partial.zip")
+        self.assertEqual([d.kind for d in result.successful], ["act"])
+        self.assertEqual([f.kind for f in result.failed], ["invoice"])
+        self.assertIn("Синтетическая", str(result.failed[0].error))
+        self.assertEqual(len(self.entries(result)), 1)
+        self.assertEqual(self.service.document_status(cid, "act"), "current")
+        self.assertEqual(self.service.document_status(cid, "invoice"), "not_created")
+
+    def test_all_renderers_fail_does_not_publish_empty_zip_or_mark_success(self):
+        cid = self.calc(self.tenant())
+        from app.documents import bulk
+        with mock.patch.dict(bulk._RENDERERS, {
+            "act": mock.Mock(side_effect=ValueError("акт")),
+            "invoice": mock.Mock(side_effect=ValueError("счёт"))}):
+            result = export_bulk_zip(self.service, 2026, 10, self.root / "empty.zip")
+        self.assertEqual(len(result.failed), 2)
+        self.assertEqual(result.successful, [])
+        self.assertFalse((self.root / "empty.zip").exists())
+        self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+        self.assertEqual(self.service.document_status(cid, "invoice"), "not_created")
+
+    def test_archive_collision_refused_before_any_document_reservation(self):
+        cid = self.calc(self.tenant())
+        target = self.root / "existing.zip"
+        target.write_bytes(b"PREVIOUS ARCHIVE")
+        with self.assertRaises(FileExistsError):
+            export_bulk_zip(self.service, 2026, 10, target)
+        self.assertEqual(target.read_bytes(), b"PREVIOUS ARCHIVE")
+        self.assertEqual(self.docs(cid), {})
+
+    def test_overwrite_failure_preserves_existing_zip_and_ungenerated_status(self):
+        cid = self.calc(self.tenant())
+        target = self.root / "existing.zip"
+        target.write_bytes(b"PREVIOUS ARCHIVE")
+        with mock.patch("app.documents.bulk.os.replace", side_effect=PermissionError("denied")):
+            result = export_bulk_zip(self.service, 2026, 10, target, overwrite=True)
+        self.assertIsNone(result.path)
+        self.assertIsInstance(result.publication_error, PermissionError)
+        self.assertEqual(target.read_bytes(), b"PREVIOUS ARCHIVE")
+        self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+        self.assertFalse(list(self.root.glob(".kontakt-zip-*")))
+
+    def test_new_zip_publish_failure_does_not_report_success(self):
+        cid = self.calc(self.tenant())
+        target = self.root / "unwritable.zip"
+        with mock.patch("app.documents.export.os.link",
+                        side_effect=OSError(errno.EACCES, "denied")):
+            result = export_bulk_zip(self.service, 2026, 10, target)
+        self.assertIsNone(result.path)
+        self.assertFalse(result.successful)
+        self.assertIsNotNone(result.publication_error)
+        self.assertFalse(target.exists())
+        self.assertFalse(list(self.root.glob(".kontakt-zip-*")))
+        self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+
+    def test_post_publication_db_failure_preserves_zip_without_false_status(self):
+        cid = self.calc(self.tenant())
+        target = self.root / "published.zip"
+        with mock.patch.object(self.service, "mark_documents_generated",
+                               side_effect=OSError("synthetic locked database")):
+            result = export_bulk_zip(self.service, 2026, 10, target)
+        self.assertEqual(len(self.entries(result)), 2)
+        self.assertFalse(result.statuses_confirmed)
+        self.assertIsNotNone(result.metadata_error)
+        for kind in ("act", "invoice"):
+            self.assertEqual(self.service.document_status(cid, kind), "not_created")
+        # Retrying a later export preserves reservations without regenerating numbers.
+        old = self.docs(cid)
+        retry = export_bulk_zip(self.service, 2026, 10, self.root / "retry.zip")
+        self.assertTrue(retry.statuses_confirmed)
+        new = self.docs(cid)
+        self.assertEqual([(old[k]["number"], old[k]["document_date"]) for k in old],
+                         [(new[k]["number"], new[k]["document_date"]) for k in new])
+
+    def test_revision_change_after_publication_prevents_all_status_updates(self):
+        first = self.calc(self.tenant("Изменённый"))
+        second = self.calc(self.tenant("Неизменённый"))
+        original = self.service.mark_documents_generated
+        def mutate(revisions, **kwargs):
+            self.service.update_calculation(first, end_reading="115")
+            return original(revisions, **kwargs)
+        with mock.patch.object(self.service, "mark_documents_generated", side_effect=mutate):
+            result = export_bulk_zip(self.service, 2026, 10, self.root / "stale.zip")
+        self.assertEqual(len(self.entries(result)), 4)
+        self.assertIsInstance(result.metadata_error, ValueError)
+        for cid in (first, second):
+            for kind in ("act", "invoice"):
+                self.assertEqual(self.service.document_status(cid, kind), "not_created")
+
+    def test_rejects_invalid_kind_and_unsafe_zip_target_before_writing_metadata(self):
+        cid = self.calc(self.tenant())
+        for kinds in ((), ("act", "act"), ("doc",)):
+            with self.subTest(kinds=kinds), self.assertRaises(ValueError):
+                export_bulk_zip(self.service, 2026, 10, self.root / "test.zip", kinds=kinds)
+        for name in ("CON.zip", "unsafe?.zip", "wrong.pdf"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                export_bulk_zip(self.service, 2026, 10, self.root / name)
+        self.assertEqual(self.docs(cid), {})
+
+    def test_named_windows_device_and_casefold_directory_avoidance(self):
+        ids = [self.calc(self.tenant(name)) for name in ("CON", "con", "..", "A\\B")]
+        result = export_bulk_zip(self.service, 2026, 10, self.root / "safe.zip",
+                                 kinds=("act",))
+        entries = self.entries(result)
+        self.assertEqual(len(entries), 4)
+        self.assertEqual(len({n.casefold() for n in entries}), 4)
+        for entry in entries:
+            folder, filename = entry.split("/")
+            self.assertNotIn(folder.upper(), {"CON", "PRN", "AUX", "NUL"})
+            self.assertTrue(filename.endswith(".pdf"))
+
+
+HAS_QT = importlib.util.find_spec("PySide6") is not None
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 недоступен")
+class BulkQtTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    @classmethod
+    def tearDownClass(cls):
+        import gc
+        from PySide6.QtCore import QCoreApplication, QEvent
+        from PySide6.QtWidgets import QApplication
+        for widget in QApplication.topLevelWidgets():
+            widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        QApplication.processEvents()
+        gc.collect()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.database = db.Database(Path(self.tmp.name) / "qt.db")
+        self.database.initialize()
+        self.service = CalculationService(self.database)
+        with self.database.transaction() as conn:
+            db.update_settings(conn, performer_name="ИП Тестовый")
+        self.service.set_tariff(2026, 10, "10")
+
+    def test_bulk_button_enabled_and_uses_selected_month(self):
+        from app.ui.main_window import MainWindow
+        from app.ui.forms import BulkExportDialog
+        window = MainWindow(self.database)
+        try:
+            window.year, window.month = 2026, 10
+            self.assertTrue(window.bulk_action.isEnabled())
+            with mock.patch.object(BulkExportDialog, "exec", return_value=0) as dialog:
+                window.bulk_action.click()
+                dialog.assert_called_once()
+        finally:
+            window.close()
+
+    def test_no_selection_blocks_file_picker(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from app.ui.forms import BulkExportDialog
+        dialog = BulkExportDialog(self.service, 2026, 10)
+        try:
+            dialog.act_check.setChecked(False)
+            dialog.invoice_check.setChecked(False)
+            with mock.patch.object(QMessageBox, "warning") as warning, \
+                 mock.patch.object(QFileDialog, "getSaveFileName") as picker:
+                dialog._export()
+            warning.assert_called_once()
+            picker.assert_not_called()
+        finally:
+            dialog.close()
+
+    def test_dialog_selects_one_type_and_publishes_real_zip(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from app.ui.forms import BulkExportDialog
+        tenant = self.service.create_tenant(name="Арендатор GUI")
+        cid = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="10", end_reading="15")["id"]
+        dialog = BulkExportDialog(self.service, 2026, 10)
+        target = Path(self.tmp.name) / "gui.zip"
+        try:
+            dialog.invoice_check.setChecked(False)
+            with mock.patch.object(QFileDialog, "getSaveFileName",
+                                   return_value=(str(target), "ZIP (*.zip)")), \
+                 mock.patch.object(QMessageBox, "information") as info:
+                dialog._export()
+            self.assertTrue(target.exists())
+            info.assert_called_once()
+            with zipfile.ZipFile(target) as archive:
+                self.assertEqual(len(archive.namelist()), 1)
+                self.assertIn("Акт_", archive.namelist()[0])
+            self.assertEqual(self.service.document_status(cid, "act"), "current")
+            self.assertEqual(self.service.document_status(cid, "invoice"), "not_created")
+        finally:
+            dialog.close()
+
+
+if __name__ == "__main__":
+    unittest.main()
