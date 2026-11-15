@@ -32,6 +32,7 @@ def _probe() -> str:
             "Путь базы данных не совпадает с изолированным профилем; проверка прервана."
         )
 
+    from PySide6.QtCore import QSettings
     from PySide6.QtGui import QImage
     from PySide6.QtWidgets import QApplication
     from app.ui.common import import_image
@@ -52,7 +53,7 @@ def _probe() -> str:
         preferences.setValue("font_size_percent", 125)
         preferences.setValue("font_weight_value", 700)
         preferences.sync()
-        if preferences.status() != preferences.Status.NoError:
+        if preferences.status() != QSettings.Status.NoError:
             raise AssertionError("Не удалось записать изолированные настройки Qt.")
     elif read_appearance() != (125, 700):
         raise AssertionError("Настройки шрифта не пережили обновление каталога программы.")
