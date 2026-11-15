@@ -21,7 +21,7 @@ from app.data import database as db
 from app.data import queries
 from app.ui.common import CANCELLED, apply_appearance, parse_number, run_confirmed, show_error, show_number
 from app.ui.forms import CalculationDialog, ExportDialog, SettingsPage, TenantDialog
-from app.ui.widgets import (CompanyDelegate, ChipDelegate, META_ROLE, TONE_ROLE,
+from app.ui.widgets import (BoltIcon, CompanyDelegate, ChipDelegate, META_ROLE, TONE_ROLE,
                             MetricCard, TenantCard, display_number,
                             month_label, russian_date)
 
@@ -170,11 +170,16 @@ class MainWindow(QMainWindow):
         nav_layout = QVBoxLayout(sidebar)
         nav_layout.setContentsMargins(15, 26, 15, 20)
         nav_layout.setSpacing(8)
-        wordmark = QLabel('<span style="color:#ec946d;font-size:24px">⚡</span> '
-                          '<span style="color:#ffffff;font-size:23px"><b>конт</b></span>'
-                          '<span style="color:#ec946d;font-size:23px"><b>акт</b></span>')
+        brand = QHBoxLayout()
+        brand.setSpacing(7)
+        brand.addWidget(BoltIcon())
+        wordmark = QLabel(
+            '<span style="color:#ffffff"><b>конт</b></span>'
+            '<span style="color:#ec946d"><b>акт</b></span>')
         wordmark.setTextFormat(Qt.TextFormat.RichText)
-        nav_layout.addWidget(wordmark)
+        wordmark.setProperty("kontaktHeadingSize", 27)
+        brand.addWidget(wordmark, 1)
+        nav_layout.addLayout(brand)
         hint = QLabel("УЧЁТ ЭЛЕКТРОЭНЕРГИИ")
         hint.setStyleSheet("color:#9bb1b2; font-size:10px; padding-bottom:19px;")
         nav_layout.addWidget(hint)
