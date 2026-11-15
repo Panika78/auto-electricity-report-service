@@ -5,6 +5,7 @@ import errno
 import importlib.util
 import io
 import os
+import sqlite3
 import tempfile
 import unittest
 import zipfile
@@ -198,6 +199,40 @@ class BulkZipTests(unittest.TestCase):
         new = self.docs(cid)
         self.assertEqual([(old[k]["number"], old[k]["document_date"]) for k in old],
                          [(new[k]["number"], new[k]["document_date"]) for k in new])
+
+    def test_second_sqlite_update_failure_rolls_back_first_status(self):
+        cid = self.calc(self.tenant())
+        original = db.update_document
+        calls = 0
+
+        def fail_second(conn, document_id, **changes):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise sqlite3.OperationalError("synthetic status write failure")
+            return original(conn, document_id, **changes)
+
+        with mock.patch("app.core.service.db.update_document", side_effect=fail_second):
+            result = export_bulk_zip(self.service, 2026, 10, self.root / "rollback.zip")
+        self.assertEqual(len(self.entries(result)), 2)
+        self.assertEqual(calls, 2)
+        self.assertIsInstance(result.metadata_error, sqlite3.OperationalError)
+        for kind in ("act", "invoice"):
+            self.assertEqual(self.service.document_status(cid, kind), "not_created")
+            self.assertIsNone(self.docs(cid)[kind]["last_generated_at"])
+
+    def test_zip_write_error_cleans_stage_and_preserves_old_archive(self):
+        cid = self.calc(self.tenant())
+        target = self.root / "old.zip"
+        target.write_bytes(b"OLD ZIP")
+        with mock.patch("app.documents.bulk.zipfile.ZipFile.writestr",
+                        side_effect=OSError("synthetic disk full")):
+            result = export_bulk_zip(self.service, 2026, 10, target, overwrite=True)
+        self.assertIsNotNone(result.publication_error)
+        self.assertEqual(result.successful, [])
+        self.assertEqual(target.read_bytes(), b"OLD ZIP")
+        self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+        self.assertFalse(list(self.root.glob(".kontakt-zip-*")))
 
     def test_revision_change_after_publication_prevents_all_status_updates(self):
         first = self.calc(self.tenant("Изменённый"))
