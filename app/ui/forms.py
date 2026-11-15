@@ -373,9 +373,6 @@ class CalculationDialog(QDialog):
         def section(title: str, description: str = ""):
             card = QFrame()
             card.setObjectName("formCard")
-            card.setStyleSheet(
-                "QFrame#formCard {background:#fffefa;border:1px solid #dfe2df;"
-                "border-radius:12px;} QLabel {border:0;background:transparent;}")
             layout = QVBoxLayout(card)
             layout.setContentsMargins(19, 17, 19, 18)
             layout.setSpacing(11)
@@ -466,9 +463,6 @@ class CalculationDialog(QDialog):
 
         preview = QFrame()
         preview.setObjectName("calculationPreview")
-        preview.setStyleSheet(
-            "QFrame#calculationPreview {background:#f2f4ee;border:1px solid #dce3dc;"
-            "border-radius:12px;} QFrame#calculationPreview QLabel {border:0;background:transparent;}")
         preview_layout = QVBoxLayout(preview)
         preview_layout.setContentsMargins(19, 17, 19, 16)
         preview_layout.setSpacing(11)
