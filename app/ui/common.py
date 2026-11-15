@@ -9,10 +9,11 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QSettings, QStandardPaths
+from PySide6.QtCore import QSettings
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
+from app.data.database import get_database_path
 from app.core.calculations import decimal_value
 from app.core.service import ConfirmationRequired
 from app.documents import ExportError
@@ -203,10 +204,12 @@ def apply_appearance() -> None:
 
 
 def image_directory() -> Path:
-    root = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
-    if not root:
-        raise OSError("Не удалось определить каталог данных приложения.")
-    path = Path(root) / "images"
+    """Managed images live alongside SQLite, not in Qt's unrelated app directory.
+
+    Existing absolute image paths stored in SQLite remain readable after upgrade.
+    No migration/deletion of previously imported files is attempted here.
+    """
+    path = get_database_path().parent / "images"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
