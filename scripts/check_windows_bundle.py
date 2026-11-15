@@ -5,6 +5,9 @@ Windows CI is Windows Server, not a substitute for Windows 10/11 manual tests.
 from __future__ import annotations
 
 import argparse
+import ctypes
+from ctypes import wintypes
+import time
 from contextlib import closing
 import hashlib
 import os
@@ -18,6 +21,92 @@ from pathlib import Path
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _visible_kontakt_window(pid: int) -> int | None:
+    """Look up a visible native Win32 top-level window of the actual EXE."""
+    user32 = ctypes.windll.user32
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    windows: list[int] = []
+
+    @callback_type
+    def visit(hwnd, _):
+        target_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(target_pid))
+        if target_pid.value == pid and user32.IsWindowVisible(hwnd):
+            title = ctypes.create_unicode_buffer(512)
+            user32.GetWindowTextW(hwnd, title, len(title))
+            if title.value.startswith("контакт"):
+                windows.append(hwnd)
+        return True
+
+    if not user32.EnumWindows(visit, 0):
+        raise OSError("Не удалось перечислить окна Win32.")
+    return windows[0] if windows else None
+
+
+def _test_normal_gui_startup(executable: Path, root: Path, environment: dict[str, str]) -> None:
+    """Use the normal startup path and Qt 'windows' platform, not --release-smoke."""
+    profile = root / "Обычный GUI профиль" / "Local"
+    profile.mkdir(parents=True)
+    roaming = root / "Обычный GUI профиль" / "Roaming"
+    roaming.mkdir(parents=True)
+    env = dict(environment)
+    env.update({
+        "LOCALAPPDATA": str(profile),
+        "APPDATA": str(roaming),
+        "KONTAKT_SMOKE_ROOT": str(profile),
+        # Only QSettings is redirected for safety; main() runs unchanged.
+        "QT_QPA_PLATFORM": "windows",
+    })
+    env.pop("KONTAKT_SMOKE_RESULT", None)
+    process = subprocess.Popen(
+        [str(executable)], env=env, cwd=executable.parent,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    try:
+        until = time.monotonic() + 25
+        hwnd = None
+        while time.monotonic() < until:
+            if process.poll() is not None:
+                raise AssertionError("Normal Windows GUI process exited before showing its window.")
+            hwnd = _visible_kontakt_window(process.pid)
+            if hwnd is not None:
+                break
+            time.sleep(0.2)
+        if hwnd is None:
+            raise AssertionError("Normal Qt Windows GUI did not create a visible 'контакт' window.")
+        # Close just the observed window. Never terminate a user-owned process.
+        user32 = ctypes.windll.user32
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.PostMessageW.restype = wintypes.BOOL
+        if not user32.PostMessageW(hwnd, 0x0010, 0, 0):  # WM_CLOSE
+            raise OSError("Windows не принял сообщение закрытия окна.")
+        code = process.wait(timeout=15)
+        if code != 0:
+            raise AssertionError(f"Normal Windows GUI exited with code {code}.")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        if process.stderr is not None:
+            process.stderr.close()
+
+    database = profile / "ElectricityReports" / "app.db"
+    if not database.is_file():
+        raise AssertionError("Normal startup did not create its own SQLite profile.")
+    with closing(sqlite3.connect(database)) as connection:
+        if connection.execute("SELECT COUNT(*) FROM tenants").fetchone()[0] != 0:
+            raise AssertionError("Normal startup modified the synthetic tenants unexpectedly.")
+    print("Normal Windows GUI startup: PASS, qwindows.dll, visible native window, WM_CLOSE.")
 
 
 def check_bundle(dist: Path) -> None:
@@ -90,6 +179,7 @@ def check_bundle(dist: Path) -> None:
             image_hash = new_hash
             print(f"Frozen EXE verification: {expected}, real Qt + PDF + ZIP, isolated profile.")
 
+        _test_normal_gui_startup(target / "kontakt.exe", root, env)
         print("Release probe complete. This does NOT certify a clean Windows 10/11 machine.")
 
 
