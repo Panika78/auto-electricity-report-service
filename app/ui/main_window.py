@@ -509,6 +509,10 @@ class MainWindow(QMainWindow):
         if old != new and not self._calc_fitting_columns:
             # Header dragging makes the layout manual until Reset is pressed.
             self._calc_columns_auto = False
+            if column == 0:
+                # Reflow long company/contract text as the user drags this
+                # boundary, so shrinking the column never crops those lines.
+                self._resize_calculation_rows()
 
     def _schedule_calculation_fit(self) -> None:
         if (not getattr(self, "_calc_columns_auto", False)
