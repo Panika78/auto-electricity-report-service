@@ -37,9 +37,26 @@ def _probe() -> str:
     from app.ui.common import import_image
     from app.ui.main_window import MainWindow
 
+    from app.ui.common import appearance_settings, read_appearance
+
     app = QApplication.instance() or QApplication([])
     app.setApplicationName("контакт")
     first_launch = not expected.exists()
+    # This must be INI in the isolated test profile, never Qt's HKCU registry.
+    preferences = appearance_settings()
+    if Path(preferences.fileName()).resolve() != root / "qa-appearance.ini":
+        raise AssertionError("Qt appearance settings escaped the synthetic profile.")
+    if first_launch:
+        if read_appearance() != (100, 400):
+            raise AssertionError("Тестовый профиль не содержит исходных настроек.")
+        preferences.setValue("font_size_percent", 125)
+        preferences.setValue("font_weight_value", 700)
+        preferences.sync()
+        if preferences.status() != preferences.Status.NoError:
+            raise AssertionError("Не удалось записать изолированные настройки Qt.")
+    elif read_appearance() != (125, 700):
+        raise AssertionError("Настройки шрифта не пережили обновление каталога программы.")
+
     database = db.Database()
     database.initialize()
 
