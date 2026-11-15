@@ -7,8 +7,8 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from html import escape
 
-from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtCore import Qt, QRectF, QPointF, QSize
+from PySide6.QtGui import QColor, QFont, QPainter, QPolygonF
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QStyledItemDelegate,
     QStyle, QVBoxLayout, QWidget, QSizePolicy,
@@ -46,6 +46,27 @@ def display_number(value, places: int = 3, suffix: str = "") -> str:
         return rendered + (f" {suffix}" if suffix else "")
     except (InvalidOperation, ValueError):
         return str(value)
+
+
+class BoltIcon(QWidget):
+    """Vector lightning mark; avoids platform-dependent colored emoji glyphs."""
+    def sizeHint(self) -> QSize:
+        return QSize(30, 38)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#ec946d"))
+        painter.translate(self.width() / 2, self.height() / 2)
+        scale = min(self.width() / 30, self.height() / 38)
+        painter.scale(scale, scale)
+        polygon = QPolygonF([
+            QPointF(3, -17), QPointF(-11, 1), QPointF(-2, 1),
+            QPointF(-7, 17), QPointF(12, -4), QPointF(2, -4),
+        ])
+        painter.drawPolygon(polygon)
+        painter.end()
 
 
 class MetricCard(QFrame):
