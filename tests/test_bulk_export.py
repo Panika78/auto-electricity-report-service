@@ -6,6 +6,8 @@ import importlib.util
 import io
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -200,19 +202,23 @@ class BulkZipTests(unittest.TestCase):
         cid = self.calc(self.tenant())
         target = self.root / "foreign.zip"
         from app.documents import bulk
-        original_publish = bulk._publish_new_file
+        original_publish = bulk._publish_new_zip
 
         def foreign_edit(staged, published):
-            original_publish(staged, published)
+            moved = original_publish(staged, published)
             published.write_bytes(b"FOREIGN BYTES")
+            return moved
 
-        with mock.patch.object(bulk, "_publish_new_file", side_effect=foreign_edit):
+        with mock.patch.object(bulk, "_publish_new_zip", side_effect=foreign_edit):
             result = export_bulk_zip(self.service, 2026, 10, target,
                                      kinds=("act",))
         self.assertEqual(result.path, target)
         self.assertTrue(target.exists())
         self.assertEqual(target.read_bytes(), b"FOREIGN BYTES")
-        self.assertIsNotNone(result.metadata_error)
+        self.assertIsNotNone(result.integrity_error)
+        self.assertIsNone(result.metadata_error)
+        self.assertEqual(result.successful, [])
+        self.assertEqual(len(result.unverified), 1)
         self.assertFalse(result.statuses_confirmed)
         self.assertEqual(self.service.document_status(cid, "act"), "not_created")
 
@@ -228,6 +234,131 @@ class BulkZipTests(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertFalse(list(self.root.glob(".kontakt-zip-*")))
         self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+
+    def test_no_hardlinks_uses_atomic_no_replace_and_real_zip(self):
+        cid = self.calc(self.tenant())
+        target = self.root / "no-link.zip"
+        with mock.patch("app.documents.bulk.os.link",
+                        side_effect=OSError(errno.ENOTSUP, "hardlinks not supported")):
+            result = export_bulk_zip(self.service, 2026, 10, target)
+        self.assertTrue(result.statuses_confirmed)
+        self.assertEqual(len(self.entries(result)), 2)
+        self.assertFalse(list(self.root.glob(".kontakt-zip-*")))
+        self.assertEqual(self.service.document_status(cid, "act"), "current")
+
+    def test_no_hardlinks_racing_creator_is_never_overwritten(self):
+        cid = self.calc(self.tenant())
+        target = self.root / "race.zip"
+        from app.documents import bulk
+        rename = bulk._rename_no_replace
+
+        def concurrent_creator(staged, destination):
+            destination.write_bytes(b"ANOTHER OWNER")
+            return rename(staged, destination)
+
+        with mock.patch("app.documents.bulk.os.link",
+                        side_effect=OSError(errno.ENOTSUP, "hardlinks not supported")), \
+             mock.patch.object(bulk, "_rename_no_replace",
+                               side_effect=concurrent_creator):
+            result = export_bulk_zip(self.service, 2026, 10, target)
+        self.assertIsNone(result.path)
+        self.assertIsNotNone(result.publication_error)
+        self.assertEqual(target.read_bytes(), b"ANOTHER OWNER")
+        self.assertFalse(list(self.root.glob(".kontakt-zip-*")))
+        self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+
+    def test_no_hardlinks_without_safe_rename_fails_closed(self):
+        cid = self.calc(self.tenant())
+        target = self.root / "unsupported.zip"
+        with mock.patch("app.documents.bulk.os.link",
+                        side_effect=OSError(errno.ENOTSUP, "hardlinks not supported")), \
+             mock.patch("app.documents.bulk._rename_no_replace",
+                        side_effect=OSError(errno.ENOTSUP, "atomic rename unavailable")):
+            result = export_bulk_zip(self.service, 2026, 10, target)
+        self.assertIsNone(result.path)
+        self.assertEqual(target.exists(), False)
+        self.assertIsNotNone(result.publication_error)
+        self.assertFalse(list(self.root.glob(".kontakt-zip-*")))
+        self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+
+    def test_crash_before_fallback_atomic_rename_leaves_no_final_zip(self):
+        # A real process termination cannot trigger exception handlers.
+        # Unlike the former exclusive-create streaming copy, the new fallback
+        # does NOT touch the final path before its single atomic rename.
+        staged = self.root / "private-stage.tmp"
+        target = self.root / "after-crash.zip"
+        staged.write_bytes(b"COMPLETED STAGED ARCHIVE")
+        program = (
+            "import errno, os, sys\n"
+            "from pathlib import Path\n"
+            "from unittest import mock\n"
+            "from app.documents import bulk\n"
+            "with mock.patch('app.documents.bulk.os.link', "
+            "side_effect=OSError(errno.ENOTSUP, 'no links')), "
+            "mock.patch.object(bulk, '_rename_no_replace', "
+            "side_effect=lambda *_: os._exit(73)):\n"
+            "    bulk._publish_new_zip(Path(sys.argv[1]), Path(sys.argv[2]))\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", program, str(staged), str(target)],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        self.assertEqual(proc.returncode, 73, proc.stderr)
+        self.assertFalse(target.exists())
+        self.assertEqual(staged.read_bytes(), b"COMPLETED STAGED ARCHIVE")
+
+    def test_deleted_zip_after_publication_is_integrity_not_sqlite_failure(self):
+        cid = self.calc(self.tenant())
+        target = self.root / "gone.zip"
+        from app.documents import bulk
+        original = bulk._publish_new_zip
+
+        def disappear(staged, destination):
+            moved = original(staged, destination)
+            destination.unlink()
+            return moved
+
+        with mock.patch.object(bulk, "_publish_new_zip", side_effect=disappear):
+            result = export_bulk_zip(self.service, 2026, 10, target, kinds=("act",))
+        self.assertEqual(result.path, target)
+        self.assertFalse(target.exists())
+        self.assertIsInstance(result.integrity_error, FileNotFoundError)
+        self.assertIsNone(result.metadata_error)
+        self.assertFalse(result.successful)
+        self.assertEqual(len(result.unverified), 1)
+        self.assertFalse(result.statuses_confirmed)
+        self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+
+    def test_newer_ready_zero_during_render_prevents_stale_statuses(self):
+        tenant = self.tenant("Новый нулевой расчёт")
+        original_id = self.calc(tenant)
+        other = self.calc(self.tenant("Неизменённый второй арендатор"))
+        from app.documents import bulk
+        renderer = bulk._RENDERERS["act"]
+        created = []
+
+        def concurrent_write(snapshot):
+            if not created:
+                other_service = CalculationService(db.Database(self.database.path))
+                newer = other_service.create_calculation(
+                    tenant, 2026, 10, start_reading="100", end_reading="100",
+                    confirm_overlap=True)
+                created.append(newer["id"])
+            return renderer(snapshot)
+
+        with mock.patch.dict(bulk._RENDERERS, {"act": concurrent_write}):
+            result = export_bulk_zip(self.service, 2026, 10, self.root / "race-calc.zip",
+                                     kinds=("act",))
+        self.assertEqual(len(created), 1)
+        self.assertEqual(len(self.entries(result)), 2)
+        self.assertIsInstance(result.metadata_error, ValueError)
+        self.assertIn("Последний готовый расчёт", str(result.metadata_error))
+        self.assertFalse(result.statuses_confirmed)
+        self.assertEqual(self.service.document_status(original_id, "act"), "not_created")
+        self.assertEqual(self.service.document_status(other, "act"), "not_created")
+        self.assertEqual(self.service.bulk_candidates(2026, 10)["skipped"][0]["reason"],
+                         "zero_consumption")
 
     def test_post_publication_db_failure_preserves_zip_without_false_status(self):
         cid = self.calc(self.tenant())
