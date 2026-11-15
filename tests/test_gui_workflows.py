@@ -1237,6 +1237,41 @@ class NativeWorkflowTests(unittest.TestCase):
                                    return_value=QMessageBox.StandardButton.Yes):
                 dialog.close()
 
+    def test_manual_amount_waits_for_unsaved_consumption_to_avoid_overwrite(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import CalculationDialog
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="10", end_reading="20")
+        editor = CalculationDialog(self.service, self.database, calculation_id=calc["id"])
+        try:
+            editor.manual_consumption_check.setChecked(True)
+            editor.manual_consumption_edit.setText("15")
+            editor._mark_pending("consumption")
+            editor.manual_amount_check.setChecked(True)
+            editor.manual_amount_edit.setText("80")
+            editor._mark_pending("total_amount")
+            editor._save_manual("total_amount")
+            self.assertIn("Сначала сохраните ручной расход", editor.status.text())
+            self.assertEqual(self.service.get_calculation(calc["id"])["total_amount"],
+                             Decimal("50.00"))
+            self.assertIn("total_amount", editor.pending)
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.Yes):
+                editor._save_manual("consumption")
+                self.assertEqual(editor.manual_amount_edit.text(), "80")
+                self.assertIn("total_amount", editor.pending)
+                editor._save_manual("total_amount")
+            saved = self.service.get_calculation(calc["id"])
+            self.assertTrue(saved["manual_consumption"])
+            self.assertTrue(saved["manual_amount"])
+            self.assertEqual(saved["consumption"], Decimal("15"))
+            self.assertEqual(saved["total_amount"], Decimal("80"))
+            self.assertFalse(editor.pending)
+        finally:
+            editor.close()
+
     def test_manual_checkbox_keeps_equal_amount_after_save_and_reopen(self):
         from PySide6.QtWidgets import QMessageBox
         from app.ui.forms import CalculationDialog
