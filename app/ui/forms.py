@@ -1360,7 +1360,8 @@ class SettingsPage(QWidget):
         try:
             with self.service.database.connection() as conn:
                 previous = db.get_settings(conn)[key]
-            uploaded = import_image(path, "signature" if key == "signature_path" else "stamp")
+            uploaded = import_image(path, "signature" if key == "signature_path" else "stamp",
+                                    database=self.service.database)
             result = self.service.update_settings(**{key: str(uploaded)})
             if result is None:
                 raise RuntimeError("Изображение не сохранено.")
@@ -1371,7 +1372,7 @@ class SettingsPage(QWidget):
             return
         self.reload()
         try:
-            remove_managed_image(previous)
+            remove_managed_image(previous, database=self.service.database)
         except OSError as error:
             QMessageBox.warning(self, "Очистка старого изображения", str(error))
         self.note.setText("Изображение сохранено в локальной папке приложения.")
@@ -1391,7 +1392,7 @@ class SettingsPage(QWidget):
         if result is not CANCELLED:
             self.reload()
             try:
-                remove_managed_image(previous)
+                remove_managed_image(previous, database=self.service.database)
             except OSError as error:
                 QMessageBox.warning(self, "Очистка изображения",
                                     "Ссылка удалена, но файл остался: " + str(error))
