@@ -32,6 +32,8 @@ QFrame#sidebar {background: #192a2f;}
 QFrame#panel, QFrame#metricCard, QFrame#tenantCard, QFrame#formCard,
 QFrame#previewCard {background: #fffefa; border: 1px solid #dfe2df; border-radius: 14px;}
 QFrame#metricCard {border: 1px solid #e6e7e2;}
+QFrame#calculationPreview {background: #f2f4ee; border: 1px solid #dce3dc;
+  border-radius: 12px;}
 QFrame#tenantCard:hover {border: 1px solid #d3a28c;}
 QFrame#sidebar QPushButton {background: transparent; border: none; border-radius: 9px;
   color: #b7c7c7; text-align: left; padding: 12px;}
