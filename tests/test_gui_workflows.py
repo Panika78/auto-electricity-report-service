@@ -334,20 +334,24 @@ class NativeWorkflowTests(unittest.TestCase):
         image = QImage(6, 6, QImage.Format.Format_RGB32)
         image.fill(0xFFFFFFFF)
         self.assertTrue(image.save(str(source)))
-        page = SettingsPage(self.service)
-        with mock.patch.object(QFileDialog, "getOpenFileName",
-                               return_value=(str(source), "Изображения (*.png *.jpg *.jpeg)")):
-            page._select_image("signature_path")
-        with self.database.connection() as conn:
-            path = db.get_settings(conn)["signature_path"]
-        self.assertTrue(path)
-        self.assertTrue(Path(path).is_file())
-        self.assertNotEqual(Path(path).resolve(), source.resolve())
-        with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
-            page._remove_image("signature_path")
-        with self.database.connection() as conn:
-            self.assertIsNone(db.get_settings(conn)["signature_path"])
-        self.assertFalse(Path(path).exists())
+        # No GUI test may write images to the developer's real profile.
+        managed = Path(self.dir.name) / "profile" / "ElectricityReports"
+        with mock.patch("app.ui.common.get_database_path", return_value=managed / "app.db"):
+            page = SettingsPage(self.service)
+            with mock.patch.object(QFileDialog, "getOpenFileName",
+                                   return_value=(str(source), "Изображения (*.png *.jpg *.jpeg)")):
+                page._select_image("signature_path")
+            with self.database.connection() as conn:
+                path = db.get_settings(conn)["signature_path"]
+            self.assertTrue(path)
+            self.assertEqual(Path(path).parent, managed / "images")
+            self.assertTrue(Path(path).is_file())
+            self.assertNotEqual(Path(path).resolve(), source.resolve())
+            with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+                page._remove_image("signature_path")
+            with self.database.connection() as conn:
+                self.assertIsNone(db.get_settings(conn)["signature_path"])
+            self.assertFalse(Path(path).exists())
 
     def test_editing_one_field_preserves_other_unsaved_input(self):
         from PySide6.QtWidgets import QMessageBox
