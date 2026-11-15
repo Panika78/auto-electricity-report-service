@@ -715,20 +715,15 @@ class CalculationDialog(QDialog):
             return
         current = self.service.get_calculation(self.calculation_id)
         flag = "manual_consumption" if field == "consumption" else "manual_amount"
-        if value == current[field]:
-            # The service deliberately does not flag an unchanged automatic
-            # value as a manual correction. Never claim otherwise.
+        if value == current[field] and current[flag]:
             self.pending.discard(field)
-            if not current[flag]:
-                checkbox.blockSignals(True)
-                checkbox.setChecked(False)
-                checkbox.blockSignals(False)
-                editor.setEnabled(False)
-                editor.clear()
             self._update_preview()
             return
+        # Checkbox selection is itself meaningful: persist an explicit manual
+        # value even when it equals the automatic one. Backend confirmation
+        # and document invalidation are still authoritative.
         result = run_confirmed(self, lambda flags: self.service.update_calculation(
-            self.calculation_id, **{field: value}, **flags))
+            self.calculation_id, mark_manual=True, **{field: value}, **flags))
         if result is CANCELLED:
             self.status.setText("Ручная корректировка не сохранена. Можно исправить и повторить.")
             return
