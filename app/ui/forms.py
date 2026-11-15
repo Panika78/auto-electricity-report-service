@@ -20,10 +20,11 @@ from app.core.validation import validate_calculation
 from app.core.service import CalculationService
 from app.data import database as db
 from app.data import queries
-from app.documents import ExportError, export_document, safe_filename
+from app.documents import ExportError, export_bulk_zip, export_document, safe_filename
 from app.documents.export import _assert_unique_destinations
 from .common import (CANCELLED, appearance_settings, apply_appearance, guard_database_errors,
                      import_image, remove_managed_image, parse_number, run_confirmed, show_error, show_number,
+                      explain_error,
                      read_appearance, available_font_weights, effective_font_weight)
 from .widgets import StatusChip, russian_date, icon_button, display_number, month_label
 
@@ -1464,6 +1465,118 @@ class SettingsPage(QWidget):
         parent = self.window()
         if hasattr(parent, "_reflow_layouts"):
             parent._reflow_layouts()
+
+
+class BulkExportDialog(QDialog):
+    """Choose document kinds and destination for all active tenants of a month."""
+
+    def __init__(self, service: CalculationService, year: int, month: int, parent=None) -> None:
+        super().__init__(parent)
+        self.service, self.year, self.month = service, year, month
+        self.setWindowTitle("Массовая выгрузка · ZIP")
+        self.resize(540, 230)
+        layout = QVBoxLayout(self)
+        hint = QLabel(f"Расчётный месяц: {month:02d}.{year}. "
+                      "Будут выбраны последние готовые расчёты активных арендаторов.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.act_check = QCheckBox("Акты")
+        self.invoice_check = QCheckBox("Счета")
+        self.act_check.setChecked(True)
+        self.invoice_check.setChecked(True)
+        layout.addWidget(self.act_check)
+        layout.addWidget(self.invoice_check)
+        export_button = QPushButton("Выбрать ZIP и выгрузить")
+        icon_button(export_button, "download")
+        export_button.clicked.connect(self._export)
+        layout.addWidget(export_button)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.clicked.connect(self.reject)
+        layout.addWidget(cancel_button)
+
+    @guard_database_errors("Ошибка массовой выгрузки")
+    def _export(self) -> None:
+        kinds = tuple(kind for kind, check in (
+            ("act", self.act_check), ("invoice", self.invoice_check)) if check.isChecked())
+        if not kinds:
+            QMessageBox.warning(self, "Нет документов", "Выберите акт, счёт или оба вида документов.")
+            return
+        name = f"Документы_{self.month:02d}-{self.year:04d}.zip"
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить документы в ZIP", str(Path.home() / name), "ZIP (*.zip)")
+        if not output:
+            return
+        target = Path(output).expanduser().absolute()
+        if target.suffix.lower() != ".zip":
+            target = target.with_suffix(".zip")
+        overwrite = target.exists() or target.is_symlink()
+        if overwrite and QMessageBox.question(
+                self, "Архив уже существует",
+                f"Файл {target} уже существует. Заменить его новым ZIP?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            result = export_bulk_zip(self.service, self.year, self.month, target,
+                                     kinds=kinds, overwrite=overwrite)
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            show_error(self, exc, "ZIP не сохранён")
+            return
+
+        lines = []
+        if result.path:
+            lines.append(f"ZIP сохранён: {result.path}")
+            lines.append(f"PDF в архиве: {len(result.successful)}")
+            if result.metadata_error:
+                lines.append("ВНИМАНИЕ: ZIP сохранён, но статусы документов в базе "
+                             "НЕ подтверждены. Проверьте данные перед повторной выгрузкой.")
+                lines.append("Ошибка фиксации: " + explain_error(result.metadata_error))
+        elif result.publication_error:
+            lines.append("ZIP не сохранён. Подготовленные документы не отмечены сформированными.")
+            lines.append("Ошибка записи: " + explain_error(result.publication_error))
+        else:
+            lines.append("Нет пригодных PDF. Пустой архив не создавался.")
+
+        if result.successful:
+            lines.append("\nВыгружены:")
+            for doc in result.successful:
+                kind_label = "Акт" if doc.kind == "act" else "Счёт"
+                lines.append(f"• {doc.tenant_name} — {kind_label} №{doc.number}")
+        if result.failed:
+            lines.append("\nОшибки документов:")
+            for failure in result.failed:
+                kind_label = "Акт" if failure.kind == "act" else "Счёт"
+                lines.append(f"• {failure.tenant_name} — {kind_label}: {explain_error(failure.error)}")
+        if result.skipped:
+            lines.append("\nПропущены арендаторы:")
+            reasons = {
+                "no_calculation": "нет расчётов за месяц",
+                "missing_tariff": "не задан тариф",
+                "incomplete_readings": "показания не заполнены",
+                "invalid_readings": "ошибка показаний",
+                "zero_consumption": "нулевой расход",
+                "not_ready": "расчёт не готов",
+            }
+            for skipped in result.skipped:
+                reason = reasons.get(skipped["reason"], skipped["reason"])
+                details = "; ".join(skipped.get("errors", ()))
+                if details:
+                    reason += f" ({details})"
+                lines.append(f'• Арендатор #{skipped["tenant_id"]}: {reason}')
+        if result.cleanup_errors or result.leftover_staged:
+            lines.append("\nВНИМАНИЕ: временные файлы могли остаться на диске.")
+            if result.leftover_staged:
+                lines.append(f"Проверьте и удалите вручную: {result.leftover_staged}")
+            lines.extend(explain_error(e) for e in result.cleanup_errors)
+
+        report = "\n".join(lines)
+        if (result.failed or result.skipped or result.publication_error
+                or result.metadata_error or result.cleanup_errors):
+            QMessageBox.warning(self, "Результат ZIP-выгрузки", report)
+        else:
+            QMessageBox.information(self, "ZIP сохранён", report)
+        if result.path is not None:
+            self.accept()
 
 
 class ExportDialog(QDialog):
