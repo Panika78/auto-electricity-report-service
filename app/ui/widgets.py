@@ -223,13 +223,17 @@ class StatusChip(QLabel):
 
     def __init__(self, text: str, tone: str = "neutral", parent=None):
         super().__init__(text, parent)
-        background, ink = self.COLORS.get(tone, self.COLORS["neutral"])
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.set_tone(tone)
+        self.setToolTip(text)
+
+    def set_tone(self, tone: str) -> None:
+        """Update the same compact visual badge for a live draft preview."""
+        background, ink = self.COLORS.get(tone, self.COLORS["neutral"])
         self.setStyleSheet(
             f"background:{background};color:{ink};padding:5px 9px;"
             "border-radius:10px;border:0;")
-        self.setToolTip(text)
 
 
 class CompanyDelegate(QStyledItemDelegate):
