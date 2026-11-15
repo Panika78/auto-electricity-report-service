@@ -24,8 +24,24 @@ from .invoice import render_invoice
 
 _RENDERERS = {"act": render_act, "invoice": render_invoice}
 _INVALID_WINDOWS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_RESERVED_WINDOWS = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
-                     *(f"LPT{i}" for i in range(1, 10))}
+_RESERVED_WINDOWS = {
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+    *(f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in "¹²³"),
+}
+
+
+def _is_reserved_windows_name(component: str) -> bool:
+    """Check a FINAL filename/folder against Windows DOS device names.
+
+    Windows ignores extensions (and spaces before their separators) when
+    recognising devices: COM¹.txt_T1 is reserved even though it ends in _T1.
+    The digits ¹, ² and ³ are also recognised as COM/LPT port numbers.
+    """
+    return component.split(".", 1)[0].rstrip(" ").upper() in _RESERVED_WINDOWS
+
+
 _LINK_UNSUPPORTED = {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM,
                      errno.EINVAL}
 
@@ -86,7 +102,7 @@ def safe_filename(kind: str, number: int, tenant_name: str, year: int, month: in
         raise ValueError("Неизвестный вид документа.")
     cleaned = _INVALID_WINDOWS.sub("_", str(tenant_name))
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")[:75].rstrip(" .") or "Арендатор"
-    if cleaned.split(".")[0].upper() in _RESERVED_WINDOWS:
+    if _is_reserved_windows_name(cleaned):
         cleaned = "_" + cleaned
     label = "Акт" if kind == "act" else "Счет"
     return f"{label}_{number}_{cleaned}_{month:02d}-{year:04d}.pdf"
@@ -95,7 +111,7 @@ def safe_filename(kind: str, number: int, tenant_name: str, year: int, month: in
 def _validate_target(path: Path, overwrite: bool) -> None:
     if path.suffix.lower() != ".pdf" or not path.name or _INVALID_WINDOWS.search(path.name):
         raise ValueError("Имя файла должно быть допустимым и иметь расширение .pdf.")
-    if path.stem.split(".")[0].upper() in _RESERVED_WINDOWS or path.name.endswith((" ", ".")):
+    if _is_reserved_windows_name(path.name) or path.name.endswith((" ", ".")):
         raise ValueError("Недопустимое имя файла Windows.")
     if not path.parent.is_dir():
         raise FileNotFoundError("Каталог для PDF не существует.")
