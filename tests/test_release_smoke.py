@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HAS_QT = importlib.util.find_spec("PySide6") is not None
@@ -14,7 +15,7 @@ HAS_QT = importlib.util.find_spec("PySide6") is not None
 class ReleaseSmokeTests(unittest.TestCase):
     def test_frozen_entrypoint_requires_explicit_isolated_profile(self):
         from app.release_smoke import run_release_smoke
-        with unittest.mock.patch.dict(os.environ, {"KONTAKT_RELEASE_SMOKE": "0"}):
+        with mock.patch.dict(os.environ, {"KONTAKT_RELEASE_SMOKE": "0"}):
             self.assertEqual(run_release_smoke(), 2)
 
     def test_source_probe_runs_twice_without_touching_real_profile(self):
