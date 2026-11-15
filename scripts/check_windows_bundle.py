@@ -18,6 +18,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from app.qa_profile import create_qa_profile
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -59,11 +61,13 @@ def _test_normal_gui_startup(executable: Path, root: Path, environment: dict[str
     profile.mkdir(parents=True)
     roaming = root / "Обычный GUI профиль" / "Roaming"
     roaming.mkdir(parents=True)
+    token = create_qa_profile(profile)
     env = dict(environment)
     env.update({
         "LOCALAPPDATA": str(profile),
         "APPDATA": str(roaming),
         "KONTAKT_SMOKE_ROOT": str(profile),
+        "KONTAKT_SMOKE_TOKEN": token,
         # Only QSettings is redirected for safety; main() runs unchanged.
         "QT_QPA_PLATFORM": "windows",
     })
@@ -124,6 +128,7 @@ def check_bundle(dist: Path) -> None:
         profile.mkdir(parents=True)
         roaming = root / "Тестовый профиль" / "Roaming"
         roaming.mkdir(parents=True)
+        token = create_qa_profile(profile)
         expected_database = profile / "ElectricityReports" / "app.db"
         marker = root / "probe.txt"
         image_hash = None
@@ -133,6 +138,7 @@ def check_bundle(dist: Path) -> None:
             "LOCALAPPDATA": str(profile),
             "APPDATA": str(roaming),
             "KONTAKT_SMOKE_ROOT": str(profile),
+            "KONTAKT_SMOKE_TOKEN": token,
             "KONTAKT_SMOKE_RESULT": str(marker),
             "KONTAKT_RELEASE_SMOKE": "1",
             "QT_QPA_PLATFORM": "offscreen",
