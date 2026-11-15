@@ -207,7 +207,8 @@ class CalculationService:
                                      exclude_id=calculation_id)
 
     def update_calculation(self, calculation_id: int, *, confirm_manual: bool = False,
-                           confirm_history: bool = False, **changes: Any) -> dict[str, Any]:
+                           confirm_history: bool = False, mark_manual: bool = False,
+                           **changes: Any) -> dict[str, Any]:
         allowed = {"start_reading", "end_reading", "consumption", "total_amount",
                    "period_start", "period_end", "year", "month"}
         if not changes or not set(changes) <= allowed:
@@ -231,8 +232,15 @@ class CalculationService:
                                  for key in ("year", "month", "period_start", "period_end"))
             month_changed = ((values["year"], values["month"]) !=
                              (current["year"], current["month"]))
-            consumption_changed = "consumption" in changes and values["consumption"] != current["consumption"]
-            amount_changed = "total_amount" in changes and values["total_amount"] != current["total_amount"]
+            # Explicit checkbox selection persists manual mode even when the
+            # chosen value equals the automatic formula. All other callers
+            # retain the original no-op semantics for equal values.
+            consumption_changed = ("consumption" in changes and (
+                values["consumption"] != current["consumption"]
+                or (mark_manual and not current["manual_consumption"])))
+            amount_changed = ("total_amount" in changes and (
+                values["total_amount"] != current["total_amount"]
+                or (mark_manual and not current["manual_amount"])))
             if reading_changed and "consumption" in changes or (reading_changed or consumption_changed or period_changed) and "total_amount" in changes:
                 raise ValueError("Ручные корректировки вводятся отдельно от изменения исходных данных.")
             if (consumption_changed or amount_changed) and not confirm_manual:
@@ -287,6 +295,42 @@ class CalculationService:
                     self._refresh_auto_starts(
                         conn, current["tenant_id"],
                         min(current["period_start"], values["period_start"]))
+            return db.get_calculation(conn, calculation_id)
+
+    def reset_manual_override(self, calculation_id: int, field: str) -> dict[str, Any]:
+        """Return a manually edited consumption/amount to formula-based values.
+
+        A checked UI override is an existing domain concept; unchecking it must
+        persistently clear the flag, not merely disable the input. Reuse the
+        same Decimal calculation, validation, transaction and document
+        invalidation rules as update_calculation().
+        """
+        if field not in ("consumption", "total_amount"):
+            raise ValueError("Сброс ручного ввода доступен только для расхода и суммы.")
+        flag = "manual_consumption" if field == "consumption" else "manual_amount"
+        with self.database.transaction() as conn:
+            current = self._require_calculation(conn, calculation_id)
+            if not current[flag]:
+                return current
+            values = {**current, flag: False}
+            if field == "consumption":
+                # Recalculating consumption also resets any manual amount.
+                values["manual_amount"] = False
+            tariff = queries.month_tariff(conn, values["year"], values["month"])
+            rate = tariff["rate"] if tariff else None
+            values["consumption"], values["total_amount"] = recalculate(
+                values["start_reading"], values["end_reading"], rate,
+                consumption=values["consumption"], amount=values["total_amount"],
+                manual_consumption=bool(values["manual_consumption"]),
+                manual_amount=bool(values["manual_amount"]))
+            values["is_ready"] = validate_calculation(values, rate).ready
+            changed = {
+                key: value for key, value in values.items()
+                if key in db._CALCULATION_COLUMNS and value != current[key]
+            }
+            if changed:
+                db.update_calculation(conn, calculation_id, **changed)
+                queries.invalidate_documents(conn, (calculation_id,))
             return db.get_calculation(conn, calculation_id)
 
     def set_tariff(self, year: int, month: int, rate: Decimal | str | int, *,

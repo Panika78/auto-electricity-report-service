@@ -127,6 +127,50 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(c['consumption'], D('30'))
         self.assertEqual(c['total_amount'], D('332.10'))
 
+    def test_explicit_equal_manual_value_keeps_checkbox_mode_and_confirmation(self):
+        self.tariff()
+        current = self.make(start_reading="100", end_reading="120")
+        original = current["total_amount"]
+        # The ordinary service API still treats a repeated value as no change.
+        same = self.service.update_calculation(
+            current["id"], total_amount=original)
+        self.assertFalse(same["manual_amount"])
+        with self.assertRaises(ConfirmationRequired) as context:
+            self.service.update_calculation(
+                current["id"], total_amount=original, mark_manual=True)
+        self.assertEqual(context.exception.code, "manual_override")
+        changed = self.service.update_calculation(
+            current["id"], total_amount=original,
+            mark_manual=True, confirm_manual=True)
+        self.assertTrue(changed["manual_amount"])
+        self.assertEqual(changed["total_amount"], original)
+        restored = self.service.reset_manual_override(current["id"], "total_amount")
+        self.assertFalse(restored["manual_amount"])
+        self.assertEqual(restored["total_amount"], original)
+
+    def test_unchecking_manual_fields_restores_formula_in_service(self):
+        self.tariff()
+        c = self.make(start_reading="100", end_reading="120")
+        c = self.service.update_calculation(c["id"], consumption="15", confirm_manual=True)
+        c = self.service.update_calculation(c["id"], total_amount="200", confirm_manual=True)
+        self.assertTrue(c["manual_consumption"])
+        self.assertTrue(c["manual_amount"])
+        c = self.service.reset_manual_override(c["id"], "total_amount")
+        self.assertTrue(c["manual_consumption"])
+        self.assertFalse(c["manual_amount"])
+        self.assertEqual(c["consumption"], D("15"))
+        self.assertEqual(c["total_amount"], D("166.05"))
+        c = self.service.reset_manual_override(c["id"], "consumption")
+        self.assertFalse(c["manual_consumption"])
+        self.assertFalse(c["manual_amount"])
+        self.assertEqual(c["consumption"], D("20"))
+        self.assertEqual(c["total_amount"], D("221.40"))
+        self.assertTrue(c["is_ready"])
+        self.assertEqual(self.service.reset_manual_override(c["id"], "consumption"), c)
+        with self.assertRaises(ValueError):
+            self.service.reset_manual_override(c["id"], "start_reading")
+        self.assertEqual(self.service.get_calculation(c["id"]), c)
+
     def test_tariff_change_resets_manual_amount_but_preserves_manual_consumption(self):
         self.tariff()
         c = self.make(start_reading='10', end_reading='20')
