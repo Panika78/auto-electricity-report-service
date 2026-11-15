@@ -207,7 +207,8 @@ class CalculationService:
                                      exclude_id=calculation_id)
 
     def update_calculation(self, calculation_id: int, *, confirm_manual: bool = False,
-                           confirm_history: bool = False, **changes: Any) -> dict[str, Any]:
+                           confirm_history: bool = False, mark_manual: bool = False,
+                           **changes: Any) -> dict[str, Any]:
         allowed = {"start_reading", "end_reading", "consumption", "total_amount",
                    "period_start", "period_end", "year", "month"}
         if not changes or not set(changes) <= allowed:
@@ -231,8 +232,15 @@ class CalculationService:
                                  for key in ("year", "month", "period_start", "period_end"))
             month_changed = ((values["year"], values["month"]) !=
                              (current["year"], current["month"]))
-            consumption_changed = "consumption" in changes and values["consumption"] != current["consumption"]
-            amount_changed = "total_amount" in changes and values["total_amount"] != current["total_amount"]
+            # Explicit checkbox selection persists manual mode even when the
+            # chosen value equals the automatic formula. All other callers
+            # retain the original no-op semantics for equal values.
+            consumption_changed = ("consumption" in changes and (
+                values["consumption"] != current["consumption"]
+                or (mark_manual and not current["manual_consumption"])))
+            amount_changed = ("total_amount" in changes and (
+                values["total_amount"] != current["total_amount"]
+                or (mark_manual and not current["manual_amount"])))
             if reading_changed and "consumption" in changes or (reading_changed or consumption_changed or period_changed) and "total_amount" in changes:
                 raise ValueError("Ручные корректировки вводятся отдельно от изменения исходных данных.")
             if (consumption_changed or amount_changed) and not confirm_manual:
