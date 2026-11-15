@@ -232,3 +232,6 @@ __marimo__/
 *.sqlite3-*
 *.sqlite3.bak
 *.sqlite3.backup
+
+# Disposable local Windows release environment
+.venv-release/
