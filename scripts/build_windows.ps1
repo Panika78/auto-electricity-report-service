@@ -5,6 +5,8 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+# Avoid Windows runner's legacy cp1252 console when printing Cyrillic QA paths.
+$env:PYTHONUTF8 = "1"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $root
 try {
