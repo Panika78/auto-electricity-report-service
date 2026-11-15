@@ -1524,7 +1524,15 @@ class BulkExportDialog(QDialog):
             return
 
         lines = []
-        if result.path:
+        if result.integrity_error:
+            lines.append("ВНИМАНИЕ: содержимое ZIP после публикации НЕ подтверждено. "
+                         "Файл мог быть изменён, удалён или стать недоступен.")
+            lines.append(f"Проверьте путь: {result.path}")
+            lines.append("Не считайте подготовленные PDF выгруженными; "
+                         "статусы документов не обновлены.")
+            lines.append(f"Подготовлено PDF (без подтверждения): {len(result.unverified)}")
+            lines.append("Ошибка проверки: " + explain_error(result.integrity_error))
+        elif result.path:
             lines.append(f"ZIP сохранён: {result.path}")
             lines.append(f"PDF в архиве: {len(result.successful)}")
             if result.metadata_error:
@@ -1580,11 +1588,11 @@ class BulkExportDialog(QDialog):
 
         report = "\n".join(lines)
         if (result.failed or result.skipped or result.publication_error
-                or result.metadata_error or result.cleanup_errors):
+                or result.integrity_error or result.metadata_error or result.cleanup_errors):
             QMessageBox.warning(self, "Результат ZIP-выгрузки", report)
         else:
             QMessageBox.information(self, "ZIP сохранён", report)
-        if result.path is not None:
+        if result.path is not None and result.integrity_error is None:
             self.accept()
 
 
