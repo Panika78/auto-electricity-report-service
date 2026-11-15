@@ -529,7 +529,7 @@ class MainWindow(QMainWindow):
         font = table.fontMetrics()
         scale = max(1.0, table.font().pointSizeF() / 10)
         # Soft widths prioritize the organization, dates, money and actions.
-        base_minima = (125, 103, 74, 74, 86, 70, 100, 78, 86, 86, 156)
+        base_minima = (120, 100, 70, 70, 78, 65, 94, 76, 80, 80, 155)
         minima = [round(width * scale) for width in base_minima]
         minima[1] = max(minima[1], font.horizontalAdvance("31.12.2026") + 18)
         # Numeric values must remain completely visible, even if this requires
