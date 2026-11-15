@@ -1,0 +1,80 @@
+# Build from a clean Python 3.11 x64 virtual environment on Windows.
+param(
+    [string]$Python = "python",
+    [switch]$SkipTests
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+$root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Push-Location $root
+try {
+    if (-not [Environment]::Is64BitOperatingSystem) {
+        throw "Для поставки требуется Windows x64."
+    }
+    & $Python -c "import sys,struct; assert sys.platform == 'win32' and sys.version_info[:2] == (3,11) and struct.calcsize('P') == 8"
+    if ($LASTEXITCODE -ne 0) { throw "Требуется CPython 3.11 x64 на Windows." }
+
+    $venv = Join-Path $root ".venv-release"
+    if (Test-Path -LiteralPath $venv) {
+        throw "Каталог .venv-release уже существует. Используйте чистый checkout или удалите только собственную тестовую среду вручную."
+    }
+    & $Python -m venv $venv
+    if ($LASTEXITCODE -ne 0) { throw "Не удалось создать изолированную среду." }
+    $pythonExe = Join-Path $venv "Scripts\python.exe"
+    & $pythonExe -m pip install --only-binary=:all: -r requirements-windows-build.txt
+    if ($LASTEXITCODE -ne 0) { throw "Не удалось установить зафиксированные зависимости сборки." }
+    & $pythonExe -m pip install --no-deps -e .
+    if ($LASTEXITCODE -ne 0) { throw "Не удалось установить приложение." }
+
+    if (-not $SkipTests) {
+        $env:QT_QPA_PLATFORM = "offscreen"
+        & $pythonExe -m unittest discover -s tests -v
+        if ($LASTEXITCODE -ne 0) { throw "Регрессионные тесты не прошли." }
+        & $pythonExe -m compileall -q app tests scripts
+        if ($LASTEXITCODE -ne 0) { throw "Ошибка компиляции Python." }
+    }
+
+    & $pythonExe -m PyInstaller --clean --noconfirm kontakt.spec
+    if ($LASTEXITCODE -ne 0) { throw "PyInstaller завершился с ошибкой." }
+
+    $bundle = Join-Path $root "dist\kontakt"
+    $exe = Join-Path $bundle "kontakt.exe"
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw "В onedir отсутствует kontakt.exe."
+    }
+    foreach ($font in @("PT_Sans-Web-Regular.ttf", "PT_Sans-Web-Bold.ttf",
+                       "PT_Serif-Web-Regular.ttf", "PT_Serif-Web-Bold.ttf",
+                       "OFL-PTSans.txt", "OFL-PTSerif.txt")) {
+        if (-not (Get-ChildItem -LiteralPath $bundle -Filter $font -File -Recurse)) {
+            throw "Не найден необходимый ресурс: $font"
+        }
+    }
+    foreach ($plugin in @("qwindows.dll", "qoffscreen.dll")) {
+        if (-not (Get-ChildItem -LiteralPath $bundle -Filter $plugin -File -Recurse)) {
+            throw "Не найден Qt platform plugin: $plugin"
+        }
+    }
+    $leaks = @(Get-ChildItem -LiteralPath $bundle -File -Recurse | Where-Object {
+        $_.Name -match '(?i)\.(db|sqlite|sqlite3|pdf|zip|bak|backup|tmp|log)$' -or
+        $_.Name -match '(?i)^(signature|stamp)[-_.]'
+    })
+    if ($leaks.Count -ne 0) {
+        throw "В дистрибутиве обнаружены подозрительные пользовательские файлы: $($leaks.FullName -join ', ')"
+    }
+
+    & $pythonExe scripts/check_windows_bundle.py --dist $bundle
+    if ($LASTEXITCODE -ne 0) { throw "Проверка собранного .exe завершилась с ошибкой." }
+
+    $zip = Join-Path $root "dist\kontakt-windows-x64.zip"
+    if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+    Compress-Archive -LiteralPath $bundle -DestinationPath $zip -CompressionLevel Optimal
+    if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
+        throw "ZIP дистрибутива не создан."
+    }
+    & $pythonExe -m pip freeze | Out-File -FilePath "dist\build-requirements.txt" -Encoding utf8
+    if ($LASTEXITCODE -ne 0) { throw "Не удалось сохранить версии зависимостей." }
+    Get-FileHash -LiteralPath $zip -Algorithm SHA256 | Format-List
+    Write-Host "Готовая поставка: $zip"
+} finally {
+    Pop-Location
+}
