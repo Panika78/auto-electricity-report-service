@@ -1043,12 +1043,20 @@ class NativeWorkflowTests(unittest.TestCase):
             window.show()
             window.period_picker.setDate(QDate(2026, 10, 1))
             QApplication.processEvents()
+            QApplication.processEvents()  # let nested scroll-area resize propagate
             table = window.calc_table
             self.assertTrue(window._calc_columns_auto)
             self.assertGreater(table.viewport().width(), 700)
+            widths = [table.columnWidth(i) for i in range(table.columnCount())]
+            app_font = QApplication.instance().property("_kontakt_base_font")
             self.assertLessEqual(
-                sum(table.columnWidth(i) for i in range(table.columnCount())),
-                table.viewport().width() + 4)
+                sum(widths),
+                table.viewport().width() + 4,
+                f"widths={widths}, viewport={table.viewport().width()}, "
+                f"base_font={app_font.pointSizeF() if app_font else None}, "
+                f"current={table.font().pointSizeF()}, "
+                f"scale={window._font_scale():.2f}, "
+                f"hscroll={table.horizontalScrollBar().maximum()}")
         finally:
             window.close()
 
