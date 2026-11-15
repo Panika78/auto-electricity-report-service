@@ -19,16 +19,19 @@ class ReleaseSmokeTests(unittest.TestCase):
             self.assertEqual(run_release_smoke(), 2)
 
     def test_qa_appearance_is_ini_only_and_requires_matching_test_database(self):
+        from app.qa_profile import create_qa_profile
         from app.ui.common import appearance_settings, read_appearance
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             expected = root / "ElectricityReports" / "app.db"
+            token = create_qa_profile(root)
             environment = {
                 "KONTAKT_RELEASE_SMOKE": "1",
                 "KONTAKT_SMOKE_ROOT": str(root),
+                "KONTAKT_SMOKE_TOKEN": token,
             }
             with mock.patch.dict(os.environ, environment), mock.patch(
-                "app.ui.common.get_database_path", return_value=expected
+                "app.qa_profile.db.get_database_path", return_value=expected
             ):
                 appearance = appearance_settings()
                 self.assertEqual(Path(appearance.fileName()).resolve(),
@@ -40,22 +43,67 @@ class ReleaseSmokeTests(unittest.TestCase):
                 self.assertEqual(read_appearance(), (125, 700))
                 self.assertTrue((root / "qa-appearance.ini").is_file())
             with mock.patch.dict(os.environ, environment), mock.patch(
-                "app.ui.common.get_database_path",
+                "app.qa_profile.db.get_database_path",
                 return_value=root / "Unrelated" / "app.db"
             ):
                 with self.assertRaisesRegex(RuntimeError, "не соответствует"):
                     appearance_settings()
+
+    def test_matching_paths_without_marker_fail_before_opening_sqlite(self):
+        with tempfile.TemporaryDirectory(prefix="kontakt-no-marker-") as directory:
+            root = Path(directory).resolve()
+            report = root / "result.txt"
+            env = os.environ.copy()
+            env.update({
+                "KONTAKT_RELEASE_SMOKE": "1",
+                "KONTAKT_SMOKE_ROOT": str(root),
+                "KONTAKT_SMOKE_TOKEN": "0" * 64,
+                "KONTAKT_SMOKE_RESULT": str(report),
+                "LOCALAPPDATA": str(root),
+                "XDG_DATA_HOME": str(root),
+                "QT_QPA_PLATFORM": "offscreen",
+            })
+            result = subprocess.run(
+                [sys.executable, "-m", "app.main", "--release-smoke"],
+                env=env, cwd=Path(__file__).resolve().parents[1],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("маркер", report.read_text(encoding="utf-8").lower())
+            self.assertFalse((root / "ElectricityReports" / "app.db").exists())
+
+    def test_rejects_actual_system_profile_even_with_valid_marker(self):
+        from app.qa_profile import create_qa_profile, validate_qa_profile
+        with tempfile.TemporaryDirectory(prefix="kontakt-system-profile-") as directory:
+            root = Path(directory).resolve()
+            token = create_qa_profile(root)
+            env = {
+                "KONTAKT_RELEASE_SMOKE": "1",
+                "KONTAKT_SMOKE_ROOT": str(root),
+                "KONTAKT_SMOKE_TOKEN": token,
+                "LOCALAPPDATA": str(root),
+                "XDG_DATA_HOME": str(root),
+            }
+            with mock.patch.dict(os.environ, env), mock.patch(
+                "app.qa_profile._system_profile_paths", return_value=(root,)
+            ):
+                with self.assertRaisesRegex(RuntimeError, "системном профиле"):
+                    validate_qa_profile()
+            self.assertFalse((root / "ElectricityReports" / "app.db").exists())
 
     def test_source_probe_runs_twice_without_touching_real_profile(self):
         with tempfile.TemporaryDirectory(prefix="kontakt-synthetic-") as directory:
             root = Path(directory)
             local = root / "Изолированный профиль"
             local.mkdir()
+            from app.qa_profile import create_qa_profile
+            token = create_qa_profile(local)
             marker = root / "result.txt"
             env = os.environ.copy()
             env.update({
                 "KONTAKT_RELEASE_SMOKE": "1",
                 "KONTAKT_SMOKE_ROOT": str(local),
+                "KONTAKT_SMOKE_TOKEN": token,
                 "KONTAKT_SMOKE_RESULT": str(marker),
                 "LOCALAPPDATA": str(local),
                 "XDG_DATA_HOME": str(local),
