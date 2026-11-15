@@ -23,7 +23,7 @@ from app.documents.export import _assert_unique_destinations
 from .common import (CANCELLED, appearance_settings, apply_appearance, guard_database_errors,
                      import_image, remove_managed_image, parse_number, run_confirmed, show_error, show_number,
                      read_appearance, available_font_weights, effective_font_weight)
-from .widgets import StatusChip, russian_date
+from .widgets import StatusChip, russian_date, icon_button
 
 
 TENANT_FIELDS = [
@@ -130,12 +130,14 @@ class TenantDialog(QDialog):
         self.history.doubleClicked.connect(lambda _index: self._open_calculation())
         history_layout.addWidget(self.history)
         open_history = QPushButton("Открыть расчёт")
+        icon_button(open_history, "edit")
         open_history.clicked.connect(self._open_calculation)
         history_layout.addWidget(open_history)
         tabs.addTab(history, "История")
 
         actions = QHBoxLayout()
         self.archive_button = QPushButton("Переместить в архив")
+        icon_button(self.archive_button, "archive")
         self.archive_button.clicked.connect(self._toggle_archive)
         actions.addWidget(self.archive_button)
         actions.addStretch()
@@ -143,6 +145,7 @@ class TenantDialog(QDialog):
         self.note.setWordWrap(True)
         actions.addWidget(self.note)
         self.create_button = QPushButton("Создать арендатора")
+        icon_button(self.create_button, "plus")
         self.create_button.clicked.connect(self._create)
         actions.addWidget(self.create_button)
         close = QPushButton("Готово")
@@ -182,6 +185,7 @@ class TenantDialog(QDialog):
                 picker.setDate(QDate.fromString(record[key], "yyyy-MM-dd"))
         self.archive_button.setText("Восстановить арендатора" if record["is_archived"]
                                     else "Переместить в архив")
+        icon_button(self.archive_button, "restore" if record["is_archived"] else "archive")
         self._filling = False
         self.pending.clear()
         self._reload_history()
@@ -420,6 +424,17 @@ class CalculationDialog(QDialog):
     @staticmethod
     def _button(label, callback):
         control = QPushButton(label)
+        symbol = {
+            "Карточка арендатора": "tenants",
+            "Ручной расход": "edit",
+            "Ручная сумма": "edit",
+            "PDF акта / счёта": "file",
+            "Удалить": "trash",
+            "Создать расчёт": "plus",
+            "Готово": "check",
+        }.get(label)
+        if symbol:
+            icon_button(control, symbol)
         control.clicked.connect(callback)
         return control
 
@@ -789,8 +804,10 @@ class SettingsPage(QWidget):
             controls.addWidget(info)
             buttons = QHBoxLayout()
             select = QPushButton("Загрузить PNG/JPG")
+            icon_button(select, "download")
             select.clicked.connect(lambda _=False, name=key: self._select_image(name))
             remove = QPushButton("Удалить")
+            icon_button(remove, "trash")
             remove.clicked.connect(lambda _=False, name=key: self._remove_image(name))
             buttons.addWidget(select)
             buttons.addWidget(remove)
@@ -837,6 +854,7 @@ class SettingsPage(QWidget):
         self.size_value.setObjectName("fontValue")
         size_row.addWidget(self.size_value)
         size_reset = QPushButton("Сбросить размер")
+        icon_button(size_reset, "reset")
         size_reset.clicked.connect(lambda: self.size_slider.setValue(100))
         size_row.addWidget(size_reset)
         sliders.addLayout(size_row)
@@ -864,6 +882,7 @@ class SettingsPage(QWidget):
         self.weight_value.setObjectName("fontValue")
         weight_row.addWidget(self.weight_value)
         weight_reset = QPushButton("Сбросить насыщенность")
+        icon_button(weight_reset, "reset")
         weight_reset.clicked.connect(lambda: self.weight_slider.setValue(400))
         weight_row.addWidget(weight_reset)
         sliders.addLayout(weight_row)
@@ -888,6 +907,7 @@ class SettingsPage(QWidget):
         self.weight_effective.setWordWrap(True)
         sliders.addWidget(self.weight_effective)
         reset_all = QPushButton("Вернуть стандартное оформление")
+        icon_button(reset_all, "reset")
         reset_all.clicked.connect(self._reset_appearance)
         sliders.addWidget(reset_all)
         appearance_body.addWidget(controls_card)
@@ -1161,6 +1181,7 @@ class ExportDialog(QDialog):
         close = QPushButton("Отмена")
         close.clicked.connect(self.reject)
         send = QPushButton("Выбрать файлы и выгрузить")
+        icon_button(send, "download")
         send.clicked.connect(self._export)
         actions.addWidget(send)
         actions.addWidget(close)
