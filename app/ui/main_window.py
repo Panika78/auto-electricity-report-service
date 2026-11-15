@@ -20,7 +20,7 @@ from app.core.validation import validate_calculation
 from app.data import database as db
 from app.data import queries
 from app.ui.common import CANCELLED, apply_appearance, parse_number, run_confirmed, show_error, show_number
-from app.ui.forms import CalculationDialog, ExportDialog, SettingsPage, TenantDialog
+from app.ui.forms import BulkExportDialog, CalculationDialog, ExportDialog, SettingsPage, TenantDialog
 from app.ui.widgets import (BoltIcon, CompanyDelegate, ChipDelegate, META_ROLE, TONE_ROLE,
                             MetricCard, TenantCard, display_number,
                             month_label, russian_date, interface_icon, icon_button)
@@ -258,8 +258,8 @@ class MainWindow(QMainWindow):
         monthbar.addStretch()
         self.bulk_action = QPushButton("Выгрузить всех · ZIP")
         icon_button(self.bulk_action, "download")
-        self.bulk_action.setEnabled(False)
-        self.bulk_action.setToolTip("Массовый экспорт станет доступен после issue #5")
+        self.bulk_action.clicked.connect(self.export_bulk_calculations)
+        self.bulk_action.setToolTip("Сохранить акты и/или счета всех подходящих арендаторов в ZIP")
         monthbar.addWidget(self.bulk_action)
         body.addLayout(monthbar)
 
@@ -924,6 +924,11 @@ class MainWindow(QMainWindow):
         calculation_id = self.selected_id(self.calc_table)
         if calculation_id is not None:
             self._export_calculation_id(calculation_id)
+
+    @database_error_dialog
+    def export_bulk_calculations(self) -> None:
+        BulkExportDialog(self.service, self.year, self.month, self).exec()
+        self.refresh_calculations()
 
     @database_error_dialog
     def new_tenant(self) -> None:
