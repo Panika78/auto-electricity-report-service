@@ -541,8 +541,7 @@ class CalculationService:
                 latest = next((c for c in calculations if validate_calculation(
                     c, tariff["rate"] if tariff else None).ready), None)
                 if not calculations:
-                    skipped.append({"tenant_id": tenant["id"], "tenant_name": tenant["name"],
-                                    "reason": "no_calculation",
+                    skipped.append({"tenant_id": tenant["id"], "reason": "no_calculation",
                                     "errors": ("Расчёты за выбранный месяц отсутствуют.",)})
                 elif latest is None:
                     newest = calculations[0]
@@ -555,12 +554,10 @@ class CalculationService:
                         reason = "invalid_readings"
                     else:
                         reason = "not_ready"
-                    skipped.append({"tenant_id": tenant["id"], "tenant_name": tenant["name"],
-                                    "reason": reason,
+                    skipped.append({"tenant_id": tenant["id"], "reason": reason,
                                     "calculation_id": newest["id"], "errors": result.errors})
                 elif latest["consumption"] == 0:
-                    skipped.append({"tenant_id": tenant["id"], "tenant_name": tenant["name"],
-                                    "reason": "zero_consumption",
+                    skipped.append({"tenant_id": tenant["id"], "reason": "zero_consumption",
                                     "calculation_id": latest["id"]})
                 else:
                     selected.append(latest)
