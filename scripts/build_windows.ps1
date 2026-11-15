@@ -67,6 +67,8 @@ try {
         throw "В дистрибутиве обнаружены подозрительные пользовательские файлы: $($leaks.FullName -join ', ')"
     }
 
+    & $pythonExe scripts/validate_windows_bundle.py --dist $bundle
+    if ($LASTEXITCODE -ne 0) { throw "В onedir есть недопустимые файлы или отсутствуют ресурсы." }
     & $pythonExe scripts/check_windows_bundle.py --dist $bundle
     if ($LASTEXITCODE -ne 0) { throw "Проверка собранного .exe завершилась с ошибкой." }
 
@@ -76,6 +78,9 @@ try {
     if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
         throw "ZIP дистрибутива не создан."
     }
+
+    & $pythonExe scripts/validate_windows_bundle.py --dist $bundle --zip $zip
+    if ($LASTEXITCODE -ne 0) { throw "Состав ZIP не соответствует проверенной папке onedir." }
 
     # Test the actual *delivered ZIP*, not only PyInstaller's working directory.
     # Extraction into a Unicode path also catches encoding/path packaging bugs.
@@ -98,7 +103,31 @@ try {
 
     & $pythonExe -m pip freeze | Out-File -FilePath "dist\build-requirements.txt" -Encoding utf8
     if ($LASTEXITCODE -ne 0) { throw "Не удалось сохранить версии зависимостей." }
+    # Manifest is generated after the ZIP is finalized: no stale SHA in docs.
+    $sourceCommit = $env:KONTAKT_SOURCE_COMMIT
+    if (-not $sourceCommit) {
+        $sourceCommit = (& git rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0) { throw "Невозможно определить Git-коммит сборки." }
+    }
+    if ($sourceCommit -notmatch '^[a-fA-F0-9]{40}$') {
+        throw "Коммит сборки должен быть полным 40-символьным Git SHA."
+    }
+    $sourceCommit = $sourceCommit.ToLowerInvariant()
+    $sha = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToUpperInvariant()
+    $manifestFile = Join-Path $root "dist\release-manifest.json"
+    [ordered]@{
+        format_version = 1
+        source_commit = $sourceCommit
+        zip_filename = "kontakt-windows-x64.zip"
+        zip_sha256 = $sha
+        os_used_for_build = [System.Environment]::OSVersion.VersionString
+        created_utc = [DateTime]::UtcNow.ToString("o")
+        acceptance = "release-candidate-not-windows-10-11-certified"
+    } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $manifestFile -Encoding utf8
+    & $pythonExe scripts/check_release_manifest.py --manifest $manifestFile --zip $zip --source-commit $sourceCommit
+    if ($LASTEXITCODE -ne 0) { throw "Манифест не соответствует построенному архиву." }
     Get-FileHash -LiteralPath $zip -Algorithm SHA256 | Format-List
+    Write-Host "Манифест SHA-256: $manifestFile"
     Write-Host "Готовая поставка: $zip"
 } finally {
     Pop-Location
