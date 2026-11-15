@@ -315,8 +315,13 @@ class MainWindow(QMainWindow):
         self.calc_table.setItemDelegateForColumn(0, CompanyDelegate(self.calc_table))
         for column in (7, 8, 9):
             self.calc_table.setItemDelegateForColumn(column, ChipDelegate(self.calc_table))
-        for column, width in enumerate((290, 160, 120, 120, 137, 105, 160, 168, 136, 136, 172)):
-            self.calc_table.setColumnWidth(column, width)
+        # Auto-fit uses the actual viewport once Qt has laid out the page.
+        # All columns remain Interactive so header dragging works afterwards.
+        self._calc_columns_auto = True
+        self._calc_fitting_columns = False
+        self._calc_fit_scheduled = False
+        self.calc_table.horizontalHeader().setMinimumSectionSize(58)
+        self.calc_table.horizontalHeader().sectionResized.connect(self._calculation_column_resized)
         self.calc_table.doubleClicked.connect(lambda _index: self.open_selected_calculation())
         self.calc_table.setToolTip("Двойной щелчок — открыть расчёт; PDF — в последнем столбце")
         contents.addWidget(self.calc_table, 1)
@@ -329,6 +334,11 @@ class MainWindow(QMainWindow):
         actions.addWidget(button("PDF акта / счёта", self.export_selected_calculation,
                                  icon="file"))
         actions.addStretch()
+        self.fit_columns_button = button(
+            "Подогнать столбцы", self.reset_calculation_columns, icon="fit")
+        self.fit_columns_button.setToolTip(
+            "Сбросить ручную ширину столбцов и снова подогнать их под окно")
+        actions.addWidget(self.fit_columns_button)
         contents.addLayout(actions)
         self.calc_footer = QLabel()
         self.calc_footer.setObjectName("mutedLabel")
@@ -468,12 +478,103 @@ class MainWindow(QMainWindow):
                 self.kpi_layout.addWidget(card, index // columns, index % columns)
             self._relayout_tenant_cards(False)
             self._relayout_tenant_cards(True)
+            self._schedule_calculation_fit()
         finally:
             self._reflowing = False
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._reflow_layouts()
+        self._schedule_calculation_fit()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._schedule_calculation_fit()
+
+    def _calculation_column_resized(self, column: int, old: int, new: int) -> None:
+        if old != new and not self._calc_fitting_columns:
+            # Header dragging makes the layout manual until Reset is pressed.
+            self._calc_columns_auto = False
+
+    def _schedule_calculation_fit(self) -> None:
+        if (not getattr(self, "_calc_columns_auto", False)
+                or getattr(self, "_calc_fit_scheduled", False)):
+            return
+        self._calc_fit_scheduled = True
+        QTimer.singleShot(0, self._run_scheduled_calculation_fit)
+
+    def _run_scheduled_calculation_fit(self) -> None:
+        self._calc_fit_scheduled = False
+        self._fit_calculation_columns()
+
+    def reset_calculation_columns(self) -> None:
+        """Return to window-fit mode after any manual header adjustments."""
+        self._calc_columns_auto = True
+        self._fit_calculation_columns()
+
+    def _fit_calculation_columns(self) -> None:
+        """Fit the table viewport where readable, scroll if not.
+
+        Widths are written programmatically in Interactive mode: unlike Qt
+        Stretch mode, users can still resize each column by dragging.
+        """
+        if (not getattr(self, "_calc_columns_auto", False)
+                or getattr(self, "_calc_fitting_columns", False)):
+            return
+        table = self.calc_table
+        viewport_width = table.viewport().width()
+        if viewport_width < 200:
+            return  # hidden/unlaid out; showEvent will retry
+
+        font = table.fontMetrics()
+        scale = max(1.0, table.font().pointSizeF() / 10)
+        # Soft widths prioritize the organization, dates, money and actions.
+        base_minima = (125, 103, 74, 74, 86, 70, 100, 78, 86, 86, 156)
+        minima = [round(width * scale) for width in base_minima]
+        minima[1] = max(minima[1], font.horizontalAdvance("31.12.2026") + 18)
+        # Numeric values must remain completely visible, even if this requires
+        # local horizontal scrolling on a narrow window.
+        for column in (2, 3, 4, 5, 6):
+            if table.rowCount():
+                content_width = max(
+                    font.horizontalAdvance(table.item(row, column).text())
+                    for row in range(table.rowCount())
+                    if table.item(row, column) is not None
+                )
+                minima[column] = max(minima[column], content_width + 18)
+        weights = (2.0, 1.0, 0.9, 0.9, 1.0, 0.75, 1.15, 0.8, 1.0, 1.0, 1.3)
+        extra = max(0, viewport_width - sum(minima))
+        weight_sum = sum(weights)
+        widths = [minimum + int(extra * factor / weight_sum)
+                  for minimum, factor in zip(minima, weights)]
+        widths[0] += extra - sum(widths) + sum(minima)
+
+        self._calc_fitting_columns = True
+        try:
+            for column, width in enumerate(widths):
+                if table.columnWidth(column) != width:
+                    table.setColumnWidth(column, width)
+        finally:
+            self._calc_fitting_columns = False
+        self._resize_calculation_rows()
+
+    def _resize_calculation_rows(self) -> None:
+        table = self.calc_table
+        metrics = table.fontMetrics()
+        text_width = max(30, table.columnWidth(0) - 22)
+        for row in range(table.rowCount()):
+            company = table.item(row, 0)
+            if company is None:
+                continue
+            name = company.text()
+            contract = str(company.data(META_ROLE) or "")
+            name_height = metrics.boundingRect(
+                0, 0, text_width, 10000, int(Qt.TextFlag.TextWordWrap), name).height()
+            contract_height = metrics.boundingRect(
+                0, 0, text_width, 10000, int(Qt.TextFlag.TextWordWrap), contract).height()
+            height = max(65, name_height + contract_height + 27, metrics.height() * 3 + 12)
+            if table.rowHeight(row) != height:
+                table.setRowHeight(row, height)
 
     def navigate(self, page: str) -> None:
         names = {"calculations": 0, "tenants": 1, "archive": 2, "settings": 3}
@@ -689,6 +790,7 @@ class MainWindow(QMainWindow):
             "Данные сохраняются после изменения поля · "
             "Наведите на статус «Не готов», чтобы увидеть причину.")
         self._reflow_layouts()
+        self._schedule_calculation_fit()
 
     @database_error_dialog
     def refresh_tenants(self, archived: bool = False) -> None:
