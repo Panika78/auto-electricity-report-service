@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPixmap
 
+from app.core.calculations import recalculate
+from app.core.validation import validate_calculation
 from app.core.service import CalculationService
 from app.data import database as db
 from app.data import queries
@@ -23,7 +25,7 @@ from app.documents.export import _assert_unique_destinations
 from .common import (CANCELLED, appearance_settings, apply_appearance, guard_database_errors,
                      import_image, remove_managed_image, parse_number, run_confirmed, show_error, show_number,
                      read_appearance, available_font_weights, effective_font_weight)
-from .widgets import StatusChip, russian_date, icon_button
+from .widgets import StatusChip, russian_date, icon_button, display_number, month_label
 
 
 TENANT_FIELDS = [
@@ -346,25 +348,58 @@ class CalculationDialog(QDialog):
         if calculation_id is not None:
             record = self.service.get_calculation(calculation_id)
             self.year, self.month = record["year"], record["month"]
+        self._loaded_calculation = None
+        self._current_tariff = None
+        self._start_proposal = None
         self.setWindowTitle("Расчёт электроэнергии")
-        self.resize(650, 610)
+        self.resize(780, 720)
         outer = QVBoxLayout(self)
-        head = QLabel("Расчёт за выбранный период")
-        head.setProperty("kontaktHeadingSize", 20)
-        outer.addWidget(head)
+        outer.setSpacing(12)
+        title = QLabel("Редактирование расчёта" if calculation_id else "Новый расчёт")
+        title.setProperty("kontaktHeadingSize", 20)
+        outer.addWidget(title)
+        period_note = QLabel(month_label(self.year, self.month))
+        period_note.setObjectName("mutedLabel")
+        outer.addWidget(period_note)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        form_content = QWidget()
-        content_layout = QVBoxLayout(form_content)
-        content_layout.setContentsMargins(6, 8, 6, 9)
-        content_layout.setSpacing(14)
         outer.addWidget(scroll, 1)
-        form = QFormLayout()
+        form_content = QWidget()
+        contents = QVBoxLayout(form_content)
+        contents.setContentsMargins(7, 6, 7, 14)
+        contents.setSpacing(13)
+
+        def section(title: str, description: str = ""):
+            card = QFrame()
+            card.setObjectName("formCard")
+            card.setStyleSheet(
+                "QFrame#formCard {background:#fffefa;border:1px solid #dfe2df;"
+                "border-radius:12px;} QLabel {border:0;background:transparent;}")
+            layout = QVBoxLayout(card)
+            layout.setContentsMargins(19, 17, 19, 18)
+            layout.setSpacing(11)
+            heading = QLabel(title)
+            heading.setProperty("kontaktHeadingSize", 19)
+            layout.addWidget(heading)
+            if description:
+                hint = QLabel(description)
+                hint.setObjectName("mutedLabel")
+                hint.setWordWrap(True)
+                layout.addWidget(hint)
+            contents.addWidget(card)
+            return layout
+
+        period_group = section(
+            "Арендатор и расчётный период",
+            "Обе даты должны находиться внутри выбранного месяца. "
+            "Пересекающиеся периоды допускаются после подтверждения.")
+        period_form = QFormLayout()
+        period_form.setSpacing(11)
         self.tenant_picker = QComboBox()
         self._load_tenants()
         self.tenant_picker.currentIndexChanged.connect(self._suggest_start)
-        form.addRow("Арендатор", self.tenant_picker)
+        period_form.addRow("Арендатор", self.tenant_picker)
         date_start = QDate(self.year, self.month, 1)
         date_end = QDate(self.year, self.month, calendar.monthrange(self.year, self.month)[1])
         self.date_start = QDateEdit(date_start)
@@ -373,51 +408,136 @@ class CalculationDialog(QDialog):
             picker.setCalendarPopup(True)
             picker.setDisplayFormat("dd.MM.yyyy")
             picker.userDateChanged.connect(lambda _d: self._save_period())
-        form.addRow("С", self.date_start)
-        form.addRow("По", self.date_end)
-        self.start_edit = _line()
-        self.end_edit = _line()
-        self.start_edit.setPlaceholderText("Автоподстановка, если доступна")
-        self.end_edit.setPlaceholderText("Можно оставить пустым")
-        for key, field in (("start_reading", self.start_edit), ("end_reading", self.end_edit)):
-            field.textEdited.connect(lambda _v, name=key: self._mark_pending(name))
-            field.editingFinished.connect(lambda name=key: self._save_reading(name))
-        form.addRow("Начальные показания", self.start_edit)
+        date_grid = QGridLayout()
+        date_grid.setSpacing(10)
+        date_grid.addWidget(QLabel("Начало периода"), 0, 0)
+        date_grid.addWidget(QLabel("Конец периода"), 0, 1)
+        date_grid.addWidget(self.date_start, 1, 0)
+        date_grid.addWidget(self.date_end, 1, 1)
+        period_form.addRow(date_grid)
+        period_group.addLayout(period_form)
+
+        readings_group = section("Показания счётчика")
+        readings = QGridLayout()
+        readings.setSpacing(10)
+        self.start_edit, self.end_edit = _line(), _line()
+        self.start_edit.setPlaceholderText("0,000 · автоподстановка при создании")
+        self.end_edit.setPlaceholderText("0,000 · можно оставить пустым")
+        readings.addWidget(QLabel("Начальные, кВт·ч"), 0, 0)
+        readings.addWidget(QLabel("Конечные, кВт·ч"), 0, 1)
+        readings.addWidget(self.start_edit, 1, 0)
+        readings.addWidget(self.end_edit, 1, 1)
+        readings_group.addLayout(readings)
         self.start_hint = QLabel()
-        self.start_hint.setStyleSheet("color:#657276;")
-        form.addRow("", self.start_hint)
-        form.addRow("Конечные показания", self.end_edit)
-        self.consumption = _line()
-        self.amount = _line()
-        for field in (self.consumption, self.amount):
-            field.setReadOnly(True)
-        form.addRow("Расход, кВт·ч", self.consumption)
-        form.addRow("Сумма, ₽", self.amount)
-        self.tariff_label = QLabel()
-        form.addRow("Тариф", self.tariff_label)
-        content_layout.addLayout(form)
+        self.start_hint.setObjectName("mutedLabel")
+        self.start_hint.setWordWrap(True)
+        readings_group.addWidget(self.start_hint)
+        for name, field in (("start_reading", self.start_edit), ("end_reading", self.end_edit)):
+            field.textEdited.connect(lambda _v, key=name: self._mark_pending(key))
+            field.editingFinished.connect(lambda key=name: self._save_reading(key))
+
+        corrections = section(
+            "Ручные корректировки",
+            "Автоматические значения рассчитываются из показаний и тарифа. "
+            "Ручное изменение требует подтверждения.")
+        manual_grid = QGridLayout()
+        manual_grid.setSpacing(12)
+        self.manual_consumption_check = QCheckBox("Изменить расход вручную")
+        self.manual_amount_check = QCheckBox("Изменить сумму вручную")
+        self.manual_consumption_edit = _line()
+        self.manual_amount_edit = _line()
+        self.manual_consumption_edit.setObjectName("manualConsumptionInput")
+        self.manual_amount_edit.setObjectName("manualAmountInput")
+        self.manual_consumption_edit.setPlaceholderText("Например, 130,000")
+        self.manual_amount_edit.setPlaceholderText("Например, 1500,00")
+        self.manual_consumption_edit.setEnabled(False)
+        self.manual_amount_edit.setEnabled(False)
+        manual_grid.addWidget(self.manual_consumption_check, 0, 0)
+        manual_grid.addWidget(self.manual_amount_check, 0, 1)
+        manual_grid.addWidget(self.manual_consumption_edit, 1, 0)
+        manual_grid.addWidget(self.manual_amount_edit, 1, 1)
+        corrections.addLayout(manual_grid)
+        tip = QLabel(
+            "Изменение показаний сбрасывает ручные расход и сумму. "
+            "Изменение расхода или тарифа сбрасывает ручную сумму.")
+        tip.setWordWrap(True)
+        tip.setObjectName("mutedLabel")
+        corrections.addWidget(tip)
+
+        preview = QFrame()
+        preview.setObjectName("calculationPreview")
+        preview.setStyleSheet(
+            "QFrame#calculationPreview {background:#f2f4ee;border:1px solid #dce3dc;"
+            "border-radius:12px;} QFrame#calculationPreview QLabel {border:0;background:transparent;}")
+        preview_layout = QVBoxLayout(preview)
+        preview_layout.setContentsMargins(19, 17, 19, 16)
+        preview_layout.setSpacing(11)
+        preview_heading = QLabel("Предварительный расчёт")
+        preview_heading.setProperty("kontaktHeadingSize", 19)
+        preview_layout.addWidget(preview_heading)
+        preview_grid = QGridLayout()
+        preview_grid.setSpacing(10)
+        self.consumption = QLabel("—")
+        self.tariff_label = QLabel("—")
+        self.amount = QLabel("—")
+        for col, (caption, value) in enumerate((
+            ("Расход", self.consumption),
+            ("Тариф месяца", self.tariff_label),
+            ("К оплате", self.amount),
+        )):
+            label = QLabel(caption)
+            label.setObjectName("mutedLabel")
+            value.setProperty("kontaktHeadingSize", 19)
+            value.setWordWrap(True)
+            preview_grid.addWidget(label, 0, col)
+            preview_grid.addWidget(value, 1, col)
+        preview_layout.addLayout(preview_grid)
+        self.preview_status = StatusChip("Черновик", "neutral")
+        preview_layout.addWidget(self.preview_status)
+        self.preview_details = QLabel("")
+        self.preview_details.setObjectName("mutedLabel")
+        self.preview_details.setWordWrap(True)
+        preview_layout.addWidget(self.preview_details)
+        contents.addWidget(preview)
 
         actions = QGridLayout()
         self.open_tenant_button = self._button("Карточка арендатора", self._open_tenant)
         actions.addWidget(self.open_tenant_button, 0, 0)
-        actions.addWidget(self._button("Ручной расход", self._edit_consumption), 0, 1)
-        actions.addWidget(self._button("Ручная сумма", self._edit_amount), 1, 0)
-        actions.addWidget(self._button("PDF акта / счёта", self._export), 1, 1)
-        content_layout.addLayout(actions)
+        actions.addWidget(self._button("PDF акта / счёта", self._export), 0, 1)
+        contents.addLayout(actions)
         self.status = QLabel()
         self.status.setWordWrap(True)
-        self.status.setStyleSheet("background:#f0f1ec; color:#3a5155; padding:11px; border-radius:8px;")
-        content_layout.addWidget(self.status)
+        self.status.setStyleSheet(
+            "background:#f0f1ec;color:#3a5155;padding:11px;border-radius:8px;")
+        contents.addWidget(self.status)
         scroll.setWidget(form_content)
 
-        bottom = QHBoxLayout()
+        footer = QHBoxLayout()
         self.delete_button = self._button("Удалить", self._delete)
-        bottom.addWidget(self.delete_button)
-        bottom.addStretch()
+        footer.addWidget(self.delete_button)
+        footer.addStretch()
         self.create_button = self._button("Создать расчёт", self._create)
-        bottom.addWidget(self.create_button)
-        bottom.addWidget(self._button("Готово", self.accept))
-        outer.addLayout(bottom)
+        footer.addWidget(self.create_button)
+        footer.addWidget(self._button("Готово", self.accept))
+        outer.addLayout(footer)
+
+        for field in (self.start_edit, self.end_edit,
+                      self.manual_consumption_edit, self.manual_amount_edit):
+            field.textChanged.connect(self._update_preview)
+        for picker in (self.date_start, self.date_end):
+            picker.dateChanged.connect(self._update_preview)
+        self.manual_consumption_check.toggled.connect(
+            lambda enabled: self._manual_toggled("consumption", enabled))
+        self.manual_amount_check.toggled.connect(
+            lambda enabled: self._manual_toggled("total_amount", enabled))
+        self.manual_consumption_edit.textEdited.connect(
+            lambda _v: self._mark_pending("consumption"))
+        self.manual_amount_edit.textEdited.connect(
+            lambda _v: self._mark_pending("total_amount"))
+        self.manual_consumption_edit.editingFinished.connect(
+            lambda: self._save_manual("consumption"))
+        self.manual_amount_edit.editingFinished.connect(
+            lambda: self._save_manual("total_amount"))
         self._refresh()
         self._initial_load = False
 
