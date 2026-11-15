@@ -73,19 +73,36 @@ class WindowsReleaseStructureTests(unittest.TestCase):
         manifest = self.root / "release-manifest.json"
         commit = "1" * 40
         data = {
-            "format_version": 1,
-            "source_commit": commit,
+            "format_version": 2,
+            "build_checkout_commit": commit,
+            "build_tree_sha": "3" * 40,
+            "pr_head_commit": "4" * 40,
             "zip_filename": archive.name,
             "zip_sha256": hashlib.sha256(archive.read_bytes()).hexdigest().upper(),
         }
         manifest.write_text(json.dumps(data), encoding="utf-8")
-        self.assertEqual(validate_manifest(manifest, archive, commit)["source_commit"], commit)
+        self.assertEqual(
+            validate_manifest(manifest, archive, commit, "4" * 40, "3" * 40)
+            ["build_checkout_commit"], commit
+        )
         archive.write_bytes(b"synthetic replacement ZIP")
         with self.assertRaisesRegex(ValueError, "hash"):
             validate_manifest(manifest, archive, commit)
         archive.write_bytes(b"synthetic release ZIP")
-        with self.assertRaisesRegex(ValueError, "source commit"):
+        with self.assertRaisesRegex(ValueError, "build checkout"):
             validate_manifest(manifest, archive, "2" * 40)
+        with self.assertRaisesRegex(ValueError, "PR head"):
+            validate_manifest(manifest, archive, commit, "5" * 40)
+        with self.assertRaisesRegex(ValueError, "source tree"):
+            validate_manifest(manifest, archive, commit, "4" * 40, "6" * 40)
+        data["build_checkout_commit"] = "2" * 40
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "build checkout"):
+            validate_manifest(manifest, archive, commit)
+        data.pop("build_tree_sha")
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "build tree"):
+            validate_manifest(manifest, archive)
 
     def test_zip_must_match_exact_ondir_contents(self):
         original = validate_directory(self.dist)
