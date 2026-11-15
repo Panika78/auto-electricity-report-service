@@ -609,6 +609,78 @@ class NativeWorkflowTests(unittest.TestCase):
         self.assertNotIn("end_reading", dialog.pending)
         dialog.close()
 
+    def test_calculation_date_pickers_clamp_to_selected_month_and_allow_partial_period(self):
+        from PySide6.QtCore import QDate
+        from app.ui.forms import CalculationDialog
+        self._tenant()
+        editor = CalculationDialog(self.service, self.database, year=2026, month=11)
+        try:
+            first, last = QDate(2026, 11, 1), QDate(2026, 11, 30)
+            for picker in (editor.date_start, editor.date_end):
+                self.assertEqual(picker.minimumDate(), first)
+                self.assertEqual(picker.maximumDate(), last)
+                self.assertEqual(picker.calendarWidget().minimumDate(), first)
+                self.assertEqual(picker.calendarWidget().maximumDate(), last)
+                picker.setDate(QDate(2026, 12, 15))
+                self.assertEqual(picker.date(), last)
+                picker.setDate(QDate(2026, 10, 15))
+                self.assertEqual(picker.date(), first)
+            editor.date_start.setDate(QDate(2026, 11, 10))
+            editor.date_end.setDate(QDate(2026, 11, 23))
+            editor.start_edit.setText("10")
+            editor.end_edit.setText("20")
+            editor._create()
+            self.assertIsNotNone(editor.calculation_id)
+            saved = self.service.get_calculation(editor.calculation_id)
+            self.assertEqual(saved["period_start"], "2026-11-10")
+            self.assertEqual(saved["period_end"], "2026-11-23")
+        finally:
+            editor.close()
+
+    def test_month_validation_gives_specific_message_if_picker_range_bypassed(self):
+        from PySide6.QtCore import QDate
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import CalculationDialog
+        tenant = self._tenant()
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 11, period_start="2026-11-10",
+            period_end="2026-11-23", start_reading="10", end_reading="20")
+        editor = CalculationDialog(self.service, self.database, calculation_id=calc["id"])
+        try:
+            # Emulate a programmer changing the Qt bounds. Normal users
+            # cannot pick December in the native November calendar.
+            for picker in (editor.date_start, editor.date_end):
+                picker.setDateRange(QDate(2026, 1, 1), QDate(2026, 12, 31))
+            editor.date_start.setDate(QDate(2026, 12, 1))
+            editor.date_end.setDate(QDate(2026, 12, 31))
+            editor._save_period()
+            self.assertIn("Выбран расчётный месяц: ноябрь 2026",
+                          editor.status.text())
+            self.assertIn("Изменения не сохранены", editor.status.text())
+            self.assertIn("period", editor.pending)
+            self.assertEqual(
+                self.service.get_calculation(calc["id"])["period_start"], "2026-11-10")
+            self.assertEqual(
+                self.service.get_calculation(calc["id"])["period_end"], "2026-11-23")
+        finally:
+            editor.close()
+        new = CalculationDialog(self.service, self.database, year=2026, month=11)
+        try:
+            for picker in (new.date_start, new.date_end):
+                picker.setDateRange(QDate(2026, 1, 1), QDate(2026, 12, 31))
+            new.date_start.setDate(QDate(2026, 12, 1))
+            new.date_end.setDate(QDate(2026, 12, 31))
+            with mock.patch.object(QMessageBox, "warning") as warning, \
+                 mock.patch.object(self.service, "create_calculation") as create:
+                new._create()
+                warning.assert_called_once()
+                self.assertIn("Выбран расчётный месяц: ноябрь 2026",
+                              warning.call_args.args[2])
+                create.assert_not_called()
+            self.assertIsNone(new.calculation_id)
+        finally:
+            new.close()
+
     def test_locked_calculation_period_read_keeps_pending_dates(self):
         from PySide6.QtCore import QDate
         from PySide6.QtWidgets import QMessageBox
@@ -937,6 +1009,95 @@ class NativeWorkflowTests(unittest.TestCase):
             self.assertEqual(window.tenant_table.rowCount(), 2)
         finally:
             window.close()
+
+    def test_font_slider_nonstep_values_snap_and_persist_after_reopening(self):
+        from PySide6.QtCore import QSettings
+        from app.ui.forms import SettingsPage
+        from app.ui.common import apply_appearance, read_appearance
+        settings = QSettings(str(Path(self.dir.name) / "font-snap.ini"),
+                             QSettings.Format.IniFormat)
+        settings.clear()
+        with mock.patch("app.ui.common.appearance_settings", return_value=settings), \
+             mock.patch("app.ui.forms.appearance_settings", return_value=settings):
+            page = SettingsPage(self.service)
+            reopened = None
+            try:
+                page.size_slider.setValue(103)
+                self.assertEqual(page.size_slider.value(), 105)
+                self.assertEqual(page.size_value.text(), "105%")
+                self.assertEqual(read_appearance(), (105, 400))
+                self.assertEqual(int(settings.value("font_size_percent")), 105)
+                page.size_slider.setValue(102)
+                self.assertEqual(page.size_slider.value(), 100)
+                self.assertEqual(read_appearance(), (100, 400))
+                page.size_slider.setValue(103)
+                page.weight_slider.setValue(450)
+                self.assertEqual(page.weight_slider.value(), 500)
+                self.assertEqual(page.weight_value.text(), "500")
+                self.assertEqual(read_appearance(), (105, 500))
+                page.weight_slider.setValue(449)
+                self.assertEqual(page.weight_slider.value(), 400)
+                self.assertEqual(read_appearance(), (105, 400))
+                page.weight_slider.setValue(450)
+                settings.sync()
+                reopened = SettingsPage(self.service)
+                self.assertEqual(reopened.size_slider.value(), 105)
+                self.assertEqual(reopened.weight_slider.value(), 500)
+                self.assertEqual(reopened.size_value.text(), "105%")
+                self.assertEqual(reopened.weight_value.text(), "500")
+                self.assertEqual(read_appearance(), (105, 500))
+            finally:
+                if reopened is not None:
+                    reopened.close()
+                page.close()
+        apply_appearance()
+
+    def test_mouse_drag_font_slider_stays_on_discrete_saved_steps(self):
+        from PySide6.QtCore import Qt, QPoint, QSettings
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionSlider
+        from app.ui.forms import SettingsPage
+        from app.ui.common import apply_appearance, read_appearance
+        settings = QSettings(str(Path(self.dir.name) / "font-drag.ini"),
+                             QSettings.Format.IniFormat)
+        settings.clear()
+        with mock.patch("app.ui.common.appearance_settings", return_value=settings), \
+             mock.patch("app.ui.forms.appearance_settings", return_value=settings):
+            page = SettingsPage(self.service)
+            try:
+                page.resize(1100, 850)
+                page.show()
+                QApplication.processEvents()
+                for slider, initial, key, label, step in (
+                    (page.size_slider, 80, "font_size_percent", page.size_value, 5),
+                    (page.weight_slider, 300, "font_weight_value", page.weight_value, 100),
+                ):
+                    slider.setValue(initial)
+                    QApplication.processEvents()
+                    options = QStyleOptionSlider()
+                    slider.initStyleOption(options)
+                    handle = slider.style().subControlRect(
+                        QStyle.ComplexControl.CC_Slider, options,
+                        QStyle.SubControl.SC_SliderHandle, slider)
+                    self.assertGreater(slider.width(), handle.width() + 40)
+                    start = handle.center()
+                    finish = QPoint(slider.width() - handle.width(), start.y())
+                    QTest.mousePress(slider, Qt.MouseButton.LeftButton, pos=start)
+                    QTest.mouseMove(slider, finish)
+                    QTest.mouseRelease(slider, Qt.MouseButton.LeftButton, pos=finish)
+                    QApplication.processEvents()
+                    self.assertGreater(slider.value(), initial,
+                                       "Mouse dragging did not move the slider")
+                    self.assertEqual((slider.value() - initial) % step, 0)
+                    self.assertEqual(int(settings.value(key)), slider.value())
+                    self.assertEqual(read_appearance()[0 if step == 5 else 1],
+                                     slider.value())
+                    self.assertEqual(label.text(),
+                                     f"{slider.value()}%" if step == 5
+                                     else str(slider.value()))
+            finally:
+                page.close()
+        apply_appearance()
 
     def test_typography_sliders_persist_independently_and_scale_without_drift(self):
         from PySide6.QtCore import QSettings
