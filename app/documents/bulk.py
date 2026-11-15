@@ -19,8 +19,8 @@ from typing import Mapping
 from app.core.service import CalculationService
 
 from .export import (
-    _INVALID_WINDOWS, _LINK_UNSUPPORTED, _RENDERERS, _RESERVED_WINDOWS, _identity,
-    _sha256_file, _unlink_if_owned, ExportError, safe_filename,
+    _INVALID_WINDOWS, _LINK_UNSUPPORTED, _RENDERERS, _identity,
+    _is_reserved_windows_name, _sha256_file, _unlink_if_owned, ExportError, safe_filename,
 )
 
 
@@ -69,7 +69,7 @@ def _safe_component(name: str, *, fallback: str, limit: int = 65) -> str:
     cleaned = _INVALID_WINDOWS.sub("_", str(name))
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
     cleaned = cleaned[:limit].rstrip(" .") or fallback
-    if cleaned.split(".")[0].upper() in _RESERVED_WINDOWS:
+    if _is_reserved_windows_name(cleaned):
         cleaned = "_" + cleaned
     return cleaned
 
@@ -85,6 +85,14 @@ def _entry_name(snapshot: dict, kind: str) -> str:
     # The IDs also distinguish duplicate manual document numbers and casefold
     # collisions, without giving unstable "copy (2)" names on re-export.
     pdf_name = f'{filename[:-4]}_D{document["id"]}.pdf'
+    # Validate the FINAL ZIP components: adding _T{id} after an extension
+    # does not neutralise COM¹.txt_T1 (Windows treats it as a device).
+    for component in (folder, pdf_name):
+        if (component in ("", ".", "..")
+                or _INVALID_WINDOWS.search(component)
+                or component.endswith((" ", "."))
+                or _is_reserved_windows_name(component)):
+            raise ExportError("Недопустимое имя папки или PDF для Windows ZIP.")
     return f"{folder}/{pdf_name}"
 
 
@@ -92,7 +100,7 @@ def _validate_target(target: Path, overwrite: bool) -> None:
     if (target.suffix.lower() != ".zip" or not target.stem
             or _INVALID_WINDOWS.search(target.name)
             or target.name.endswith((" ", "."))
-            or target.stem.split(".")[0].upper() in _RESERVED_WINDOWS):
+            or _is_reserved_windows_name(target.name)):
         raise ValueError("Имя архива должно быть допустимым для Windows и оканчиваться на .zip.")
     if not target.parent.is_dir():
         raise FileNotFoundError("Каталог для сохранения ZIP не существует.")
