@@ -1,0 +1,58 @@
+name: Windows onedir release candidate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "scripts/**"
+      - "tests/**"
+      - "kontakt.spec"
+      - "requirements-windows-build.txt"
+      - "pyproject.toml"
+      - ".github/workflows/windows-release.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows Server 2022 x64 (NOT Windows 10/11 acceptance)
+    runs-on: windows-2022
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: requirements-windows-build.txt
+      - name: Build, test, execute frozen EXE twice, and create sanitized ZIP
+        shell: pwsh
+        run: ./scripts/build_windows.ps1
+      - name: Verify archive contains only the onedir application folder
+        shell: pwsh
+        run: |
+          $zip = "dist/kontakt-windows-x64.zip"
+          if (-not (Test-Path $zip)) { throw "Release ZIP is missing." }
+          $entries = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+          try {
+            if (-not ($entries.Entries | Where-Object FullName -Match '(^|/)kontakt.exe$')) {
+              throw "Release ZIP has no kontakt.exe."
+            }
+            if ($entries.Entries | Where-Object FullName -Match '(?i)\.(db|sqlite|sqlite3|pdf|zip|bak|backup|tmp|log)$') {
+              throw "Release ZIP contains prohibited user-data extensions."
+            }
+          } finally {
+            $entries.Dispose()
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kontakt-windows-x64-rc
+          path: |
+            dist/kontakt-windows-x64.zip
+            dist/build-requirements.txt
+          if-no-files-found: error
+          retention-days: 14
