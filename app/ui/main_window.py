@@ -9,7 +9,7 @@ from functools import wraps
 from PySide6.QtCore import QDate, Qt, QLocale, QTimer
 from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDateEdit, QFrame, QHBoxLayout, QLabel,
+    QAbstractItemView, QApplication, QComboBox, QDateEdit, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView,
     QScrollArea, QGridLayout, QSizePolicy, QTabWidget,
@@ -440,6 +440,20 @@ class MainWindow(QMainWindow):
         else:
             self._tenant_cards = []
 
+    def _font_scale(self) -> float:
+        """Scale relative to Qt's actual system font (not an assumed 10 pt).
+
+        Windows defaults to a different base point size than Ubuntu. Treating
+        that default as extra zoom prevented normal-size tables from fitting.
+        """
+        app = QApplication.instance()
+        base = app.property("_kontakt_base_font") if app is not None else None
+        reference = base.pointSizeF() if base is not None else self.font().pointSizeF()
+        current = self.font().pointSizeF()
+        if reference <= 0 or current <= 0:
+            return 1.0
+        return current / reference
+
     def _relayout_tenant_cards(self, archived: bool) -> None:
         widgets = self._archive_cards if archived else self._tenant_cards
         layout = self.archive_cards_layout if archived else self.tenant_cards_layout
@@ -447,7 +461,7 @@ class MainWindow(QMainWindow):
         # Work from the viewport width rather than the previous column geometry,
         # so the grid can really shrink when the user makes the window narrower.
         available = max(230, self.pages.width() - 110)
-        scale = max(1, self.font().pointSizeF() / 10)
+        scale = max(1.0, self._font_scale())
         minimum = int(285 * scale)
         columns = max(1, min(4, (available + 13) // (minimum + 13)))
         while layout.count():
@@ -465,7 +479,7 @@ class MainWindow(QMainWindow):
             return
         self._reflowing = True
         try:
-            scale = max(1, self.font().pointSizeF() / 10)
+            scale = max(1.0, self._font_scale())
             if hasattr(self, "sidebar"):
                 self.sidebar.setFixedWidth(min(350, max(205, int(218 * scale))))
             columns = 4 if self.pages.width() >= 1140 * scale else (
@@ -527,7 +541,7 @@ class MainWindow(QMainWindow):
             return  # hidden/unlaid out; showEvent will retry
 
         font = table.fontMetrics()
-        scale = max(1.0, table.font().pointSizeF() / 10)
+        scale = max(1.0, self._font_scale())
         # Soft widths prioritize the organization, dates, money and actions.
         base_minima = (120, 100, 70, 70, 78, 65, 94, 76, 80, 80, 155)
         minima = [round(width * scale) for width in base_minima]
