@@ -1198,6 +1198,33 @@ class NativeWorkflowTests(unittest.TestCase):
                                    return_value=QMessageBox.StandardButton.Yes):
                 dialog.close()
 
+    def test_manual_checkbox_keeps_equal_amount_after_save_and_reopen(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import CalculationDialog
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "5")
+        calc = self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="10", end_reading="20")
+        editor = CalculationDialog(self.service, self.database, calculation_id=calc["id"])
+        try:
+            editor.manual_amount_check.setChecked(True)
+            self.assertEqual(editor.manual_amount_edit.text(), "50,00")
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.Yes) as question:
+                editor._save_manual("total_amount")
+                question.assert_called_once()
+            self.assertFalse(editor.pending)
+            self.assertTrue(editor.manual_amount_check.isChecked())
+            self.assertTrue(self.service.get_calculation(calc["id"])["manual_amount"])
+            reopened = CalculationDialog(self.service, self.database,
+                                         calculation_id=calc["id"])
+            self.assertTrue(reopened.manual_amount_check.isChecked())
+            reopened.close()
+            editor.manual_amount_check.setChecked(False)
+            self.assertFalse(self.service.get_calculation(calc["id"])["manual_amount"])
+        finally:
+            editor.close()
+
     def test_manual_amount_checkbox_saves_and_unchecking_resets_formula(self):
         from PySide6.QtWidgets import QMessageBox
         from app.ui.forms import CalculationDialog
