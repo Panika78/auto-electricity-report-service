@@ -6,6 +6,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from scripts.check_release_manifest import validate_manifest
 from scripts.validate_windows_bundle import (
     PDF_RESOURCES, UnsafeBundleError, validate_directory, validate_zip,
 )
@@ -65,6 +66,26 @@ class WindowsReleaseStructureTests(unittest.TestCase):
         (self.dist / "_internal/PySide6/Qt/plugins/platforms/qwindows.dll").unlink()
         with self.assertRaisesRegex(UnsafeBundleError, "Qt platform"):
             validate_directory(self.dist)
+
+    def test_release_manifest_is_bound_to_inner_zip_and_git_commit(self):
+        archive = self.root / "kontakt-windows-x64.zip"
+        archive.write_bytes(b"synthetic release ZIP")
+        manifest = self.root / "release-manifest.json"
+        commit = "1" * 40
+        data = {
+            "format_version": 1,
+            "source_commit": commit,
+            "zip_filename": archive.name,
+            "zip_sha256": hashlib.sha256(archive.read_bytes()).hexdigest().upper(),
+        }
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual(validate_manifest(manifest, archive, commit)["source_commit"], commit)
+        archive.write_bytes(b"synthetic replacement ZIP")
+        with self.assertRaisesRegex(ValueError, "hash"):
+            validate_manifest(manifest, archive, commit)
+        archive.write_bytes(b"synthetic release ZIP")
+        with self.assertRaisesRegex(ValueError, "source commit"):
+            validate_manifest(manifest, archive, "2" * 40)
 
     def test_zip_must_match_exact_ondir_contents(self):
         original = validate_directory(self.dist)
