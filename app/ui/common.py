@@ -120,6 +120,19 @@ def show_number(value: Any) -> str:
 
 
 def appearance_settings() -> QSettings:
+    # Windows NativeFormat normally uses HKCU. During release QA, use a
+    # dedicated INI under the explicitly isolated synthetic profile instead.
+    # Ordinary users keep the existing native Qt settings without migration.
+    if os.environ.get("KONTAKT_RELEASE_SMOKE") == "1":
+        selected = os.environ.get("KONTAKT_SMOKE_ROOT")
+        if not selected:
+            raise RuntimeError("Для release-проверки требуется отдельный тестовый профиль.")
+        root = Path(selected).expanduser().resolve()
+        if not root.is_dir() or get_database_path() != root / "ElectricityReports" / "app.db":
+            raise RuntimeError("Профиль настроек не соответствует тестовой базе; проверка прервана.")
+        settings = QSettings(str(root / "qa-appearance.ini"), QSettings.Format.IniFormat)
+        settings.setFallbacksEnabled(False)
+        return settings
     return QSettings("Kontakt", "Kontakt")
 
 
