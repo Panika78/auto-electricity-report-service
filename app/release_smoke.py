@@ -65,7 +65,7 @@ def _probe() -> str:
             image.fill(0xFFFFFFFF)
             if not image.save(str(image_path)):
                 raise AssertionError("Qt не смог записать синтетическое PNG.")
-            stored = import_image(str(image_path), "signature")
+            stored = import_image(str(image_path), "signature", database=database)
             if stored.parent != expected.parent / "images" or not stored.is_file():
                 raise AssertionError("Изображение сохранено не рядом с пользовательской БД.")
             service.update_settings(signature_path=str(stored))
