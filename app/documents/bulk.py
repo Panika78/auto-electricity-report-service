@@ -167,6 +167,8 @@ def export_bulk_zip(service: CalculationService, year: int, month: int,
                 document = service.reserve_document(calc["id"], kind)
                 snapshot = service.prepare_document(calc["id"], kind)
                 tenant_name = snapshot["tenant"]["name"]
+                if not (snapshot["performer"].get("performer_name") or "").strip():
+                    raise ValueError("Не заполнено имя исполнителя в настройках.")
                 if (snapshot["document"] is None
                         or snapshot["document"]["id"] != document["id"]):
                     raise ExportError("Метаданные документа изменились во время подготовки.")
