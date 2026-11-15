@@ -335,7 +335,7 @@ class MainWindow(QMainWindow):
                                  icon="file"))
         actions.addStretch()
         self.fit_columns_button = button(
-            "Подогнать столбцы", self.reset_calculation_columns, icon="fit")
+            "Сбросить и подогнать", self.reset_calculation_columns, icon="fit")
         self.fit_columns_button.setToolTip(
             "Сбросить ручную ширину столбцов и снова подогнать их под окно")
         actions.addWidget(self.fit_columns_button)
