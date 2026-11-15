@@ -1040,9 +1040,14 @@ class NativeWorkflowTests(unittest.TestCase):
             QApplication.processEvents()
             self.assertTrue(window._calc_columns_auto)
             self.assertNotEqual(table.columnWidth(0), manual)
-            self.assertLessEqual(abs(
-                table.viewport().width() -
-                sum(table.columnWidth(i) for i in range(table.columnCount()))), 4)
+            reset_viewport = table.viewport().width()
+            reset_total = sum(table.columnWidth(i) for i in range(table.columnCount()))
+            if reset_total > reset_viewport + 4:
+                # Different Windows fonts/DPI can require a horizontal scroll
+                # for the deliberately huge number; never clip that value.
+                self.assertGreater(table.horizontalScrollBar().maximum(), 0)
+            else:
+                self.assertLessEqual(abs(reset_viewport - reset_total), 4)
             window.resize(2000, 940)
             QApplication.processEvents()
             self.assertTrue(window._calc_columns_auto)
