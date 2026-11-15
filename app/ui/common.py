@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import QSettings, QStandardPaths
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from app.core.calculations import decimal_value
@@ -121,27 +121,85 @@ def appearance_settings() -> QSettings:
     return QSettings("Kontakt", "Kontakt")
 
 
-def apply_appearance() -> None:
+SIZE_MIN, SIZE_MAX, SIZE_STEP = 80, 200, 5
+WEIGHT_MIN, WEIGHT_MAX, WEIGHT_STEP = 300, 800, 100
+
+
+def read_appearance() -> tuple[int, int]:
+    """Read percentages and CSS weights; migrate legacy three-way settings."""
     settings = appearance_settings()
-    size = settings.value("font_size", "standard")
-    weight = settings.value("font_weight", "normal")
-    font = QApplication.instance().font()
-    font.setPointSize({"compact": 9, "standard": 10, "large": 12}.get(size, 10))
-    font.setWeight({"light": QFont.Weight.Light,
-                    "normal": QFont.Weight.Normal,
-                    "bold": QFont.Weight.DemiBold}.get(weight, QFont.Weight.Normal))
-    QApplication.instance().setFont(font)
-    scale = {"compact": .93, "standard": 1, "large": 1.16}.get(size, 1)
-    heading_weight = {"light": 530, "normal": 700, "bold": 850}.get(weight, 700)
-    # App-wide stylesheet is inherited by future dialogs too. Avoid retaining or
-    # restyling ephemeral PySide wrappers from QApplication.allWidgets().
+    old_size = {"compact": 90, "standard": 100, "large": 120}
+    old_weight = {"light": 300, "normal": 400, "bold": 700}
+    size = settings.value(
+        "font_size_percent", old_size.get(settings.value("font_size", "standard"), 100))
+    weight = settings.value(
+        "font_weight_value", old_weight.get(settings.value("font_weight", "normal"), 400))
+    try:
+        size = int(size)
+        weight = int(weight)
+    except (ValueError, TypeError):
+        return 100, 400
+    if not SIZE_MIN <= size <= SIZE_MAX or (size - SIZE_MIN) % SIZE_STEP:
+        size = 100
+    if not WEIGHT_MIN <= weight <= WEIGHT_MAX or (weight - WEIGHT_MIN) % WEIGHT_STEP:
+        weight = 400
+    return size, weight
+
+
+def available_font_weights(family: str | None = None) -> tuple[int, ...]:
+    """Find actually installed faces instead of promising nonexistent weight steps."""
     app = QApplication.instance()
-    rules = [
-        f'QLabel[kontaktHeadingSize="{nominal}"] '
-        f'{{font-size:{round(nominal * scale)}px; font-weight:{heading_weight}; color:#1b2b30;}}'
-        for nominal in (19, 20, 27)
-    ]
-    app.setStyleSheet("\n".join(rules))
+    family = family or (app.font().family() if app is not None else QFont().family())
+    try:
+        faces = QFontDatabase.styles(family)
+        weights = {
+            int(QFontDatabase.font(family, face, 10).weight())
+            for face in faces
+        }
+        return tuple(sorted(weights)) if weights else (400,)
+    except (ValueError, RuntimeError):
+        return (400, 700)
+
+
+def effective_font_weight(requested: int, available: tuple[int, ...]) -> int:
+    """Map a CSS step to the closest real face; prefer lighter in ties."""
+    return min(available or (400,), key=lambda actual: (abs(actual - requested), actual))
+
+
+def apply_appearance() -> None:
+    """Scale from the immutable OS base font, not from the previous slider value.
+
+    Point sizes let Qt handle Windows DPI once; no extra devicePixelRatio
+    multiplier is applied. The QSettings keys affect only Qt presentation.
+    """
+    app = QApplication.instance()
+    if app is None:
+        return
+    base = app.property("_kontakt_base_font")
+    if not isinstance(base, QFont):
+        base = QFont(app.font())
+        app.setProperty("_kontakt_base_font", base)
+    size, requested = read_appearance()
+    scale = size / 100
+    effective = effective_font_weight(requested, available_font_weights(base.family()))
+    font = QFont(base)
+    point_size = base.pointSizeF()
+    font.setPointSizeF(max(7, point_size if point_size > 0 else 10) * scale)
+    font.setWeight(QFont.Weight(effective))
+    app.setFont(font)
+    # Headings preserve contrast with the text weight instead of flattening
+    # every label to one global font weight.
+    headings = []
+    for nominal in (19, 20, 27):
+        bold_weight = min(900, effective + 200)
+        headings.append(
+            f'QLabel[kontaktHeadingSize="{nominal}"] '
+            f'{{font-size:{nominal * scale:.1f}pt;font-weight:{bold_weight};color:#1b2b30;}}')
+    headings.append(
+        f'QLabel#tenantName {{font-size:{15 * scale:.1f}pt;'
+        f'font-weight:{min(900, effective + 200)};color:#1b2b30;}}')
+    app.setStyleSheet("\n".join(headings))
+
 
 
 def image_directory() -> Path:
