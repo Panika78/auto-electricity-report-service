@@ -553,15 +553,17 @@ class MainWindow(QMainWindow):
             a = doc_label(docs.get((calc["id"], "act")))
             invoice = doc_label(docs.get((calc["id"], "invoice")))
             archived = bool(tenant.get("is_archived"))
+            # Like the agreed HTML, the ready ratio is for active tenants,
+            # while monetary and stale-document totals cover the whole month.
+            if checked.ready and calc["total_amount"] is not None:
+                amount_ready += Decimal(str(calc["total_amount"]))
+            stale_docs += int(a == "Обновить") + int(invoice == "Обновить")
             if not archived:
                 active_total += 1
                 if checked.ready:
                     ready_active += 1
-                    if calc["total_amount"] is not None:
-                        amount_ready += Decimal(str(calc["total_amount"]))
                 if a == invoice == "Сформирован":
                     generated_both += 1
-                stale_docs += int(a == "Обновить") + int(invoice == "Обновить")
             data.append((calc, tenant, checked, a, invoice))
 
         active_count = sum(not t["is_archived"] for t in tenants_list)
