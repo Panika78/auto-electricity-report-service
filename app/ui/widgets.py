@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from html import escape
 
 from PySide6.QtCore import Qt, QRectF, QPointF, QSize
-from PySide6.QtGui import QColor, QFont, QPainter, QPolygonF
+from PySide6.QtGui import QColor, QFont, QPainter, QPolygonF, QPixmap, QIcon, QPen, QPainterPath
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QStyledItemDelegate,
     QStyle, QVBoxLayout, QWidget, QSizePolicy,
@@ -67,6 +67,114 @@ class BoltIcon(QWidget):
         ])
         painter.drawPolygon(polygon)
         painter.end()
+
+
+def interface_icon(name: str, *, color: str = "#263a3f") -> QIcon:
+    """Small outline icons drawn with Qt, matching the HTML prototype's icon language.
+
+    QPainter avoids adding QtSvg or external icon/font dependencies. All paths
+    are presentation-only and scale with Qt's device pixel ratio.
+    """
+    image = QPixmap(24, 24)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color), 1.9)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def path(*points):
+        stroke = QPainterPath()
+        stroke.moveTo(*points[0])
+        for point in points[1:]:
+            stroke.lineTo(*point)
+        painter.drawPath(stroke)
+
+    if name == "dashboard":
+        for x, y, w, h in ((3, 3, 7, 9), (14, 3, 7, 5),
+                           (14, 12, 7, 9), (3, 16, 7, 5)):
+            painter.drawRoundedRect(x, y, w, h, 1, 1)
+    elif name == "tenants":
+        painter.drawRoundedRect(3, 5, 18, 16, 2, 2)
+        path((7, 5), (7, 3), (17, 3), (17, 5))
+        for y in (10, 15):
+            path((8, y), (11, y))
+            path((13, y), (16, y))
+    elif name == "settings":
+        painter.drawEllipse(9, 9, 6, 6)
+        painter.drawEllipse(4, 4, 16, 16)
+        for x1, y1, x2, y2 in (
+            (12, 2, 12, 5), (12, 19, 12, 22), (2, 12, 5, 12),
+            (19, 12, 22, 12), (5, 5, 7, 7), (17, 17, 19, 19),
+            (19, 5, 17, 7), (7, 17, 5, 19),
+        ):
+            path((x1, y1), (x2, y2))
+    elif name == "plus":
+        path((12, 5), (12, 19))
+        path((5, 12), (19, 12))
+    elif name == "download":
+        path((12, 3), (12, 15), (7, 10))
+        path((12, 15), (17, 10))
+        path((4, 17), (4, 21), (20, 21), (20, 17))
+    elif name == "search":
+        painter.drawEllipse(4, 4, 14, 14)
+        path((16, 16), (21, 21))
+    elif name == "edit":
+        path((4, 20), (8, 20), (20, 8), (16, 4), (4, 16), (4, 20))
+        path((14, 6), (18, 10))
+    elif name == "archive":
+        painter.drawRoundedRect(3, 4, 18, 5, 1, 1)
+        path((5, 9), (5, 21), (19, 21), (19, 9))
+        path((10, 14), (14, 14))
+    elif name in ("history", "restore", "reset"):
+        painter.drawArc(3, 3, 18, 18, 40 * 16, 280 * 16)
+        path((3, 17), (3, 12), (8, 12))
+        if name == "history":
+            path((12, 7), (12, 12), (16, 14))
+    elif name == "file":
+        path((5, 2), (14, 2), (19, 7), (19, 22), (5, 22), (5, 2))
+        path((14, 2), (14, 8), (19, 8))
+        path((8, 13), (16, 13))
+        path((8, 17), (16, 17))
+    elif name == "arrow":
+        path((4, 12), (20, 12), (14, 6))
+        path((20, 12), (14, 18))
+    elif name == "fit":
+        for points in (
+            ((3, 9), (3, 3), (9, 3)),
+            ((15, 3), (21, 3), (21, 9)),
+            ((21, 15), (21, 21), (15, 21)),
+            ((9, 21), (3, 21), (3, 15)),
+        ):
+            path(*points)
+        path((7, 12), (17, 12))
+    elif name == "calendar":
+        painter.drawRoundedRect(3, 5, 18, 16, 2, 2)
+        path((7, 3), (7, 7))
+        path((17, 3), (17, 7))
+        path((3, 10), (21, 10))
+    elif name == "trash":
+        path((4, 7), (20, 7))
+        path((10, 4), (14, 4))
+        path((6, 7), (7, 21), (17, 21), (18, 7))
+        path((10, 10), (10, 17))
+        path((14, 10), (14, 17))
+    elif name == "check":
+        path((5, 12), (10, 17), (20, 7))
+    else:
+        painter.drawEllipse(4, 4, 16, 16)
+        path((12, 11), (12, 17))
+    painter.end()
+    return QIcon(image)
+
+
+def icon_button(button: QPushButton, name: str, *, light: bool = False) -> QPushButton:
+    """Attach an outline icon while preserving button text and accessible name."""
+    button.setIcon(interface_icon(name, color="#fffefa" if light else "#263a3f"))
+    button.setIconSize(QSize(18, 18))
+    return button
 
 
 class MetricCard(QFrame):
@@ -216,12 +324,14 @@ class TenantCard(QFrame):
         for label, callback in (("Карточка", open_card), ("История", open_history)):
             action = QPushButton(label)
             action.setObjectName("cardAction")
+            icon_button(action, "edit" if label == "Карточка" else "history")
             action.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             action.clicked.connect(callback)
             first_line.addWidget(action)
         actions.addLayout(first_line)
         archive_action = QPushButton("Восстановить" if archived else "В архив")
         archive_action.setObjectName("cardAction")
+        icon_button(archive_action, "restore" if archived else "archive")
         archive_action.clicked.connect(toggle_archive)
         actions.addWidget(archive_action)
         outer.addLayout(actions)
