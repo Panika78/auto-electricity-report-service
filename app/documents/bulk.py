@@ -6,8 +6,10 @@ the complete ZIP stays available and its document statuses remain unconfirmed.
 """
 from __future__ import annotations
 
+import errno
 import os
 import re
+import sys
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
@@ -17,8 +19,8 @@ from typing import Mapping
 from app.core.service import CalculationService
 
 from .export import (
-    _INVALID_WINDOWS, _RENDERERS, _RESERVED_WINDOWS, _identity,
-    _publish_new_file, _sha256_file, _unlink_if_owned, ExportError, safe_filename,
+    _INVALID_WINDOWS, _LINK_UNSUPPORTED, _RENDERERS, _RESERVED_WINDOWS, _identity,
+    _sha256_file, _unlink_if_owned, ExportError, safe_filename,
 )
 
 
@@ -51,12 +53,15 @@ class BulkExportResult:
     skipped: list[dict] = field(default_factory=list)
     publication_error: Exception | None = None
     metadata_error: Exception | None = None
+    integrity_error: Exception | None = None
+    unverified: list[BulkDocument] = field(default_factory=list)
     cleanup_errors: list[Exception] = field(default_factory=list)
     leftover_staged: Path | None = None
 
     @property
     def statuses_confirmed(self) -> bool:
-        return self.path is not None and self.metadata_error is None
+        return (self.path is not None and self.metadata_error is None
+                and self.integrity_error is None)
 
 
 def _safe_component(name: str, *, fallback: str, limit: int = 65) -> str:
@@ -106,6 +111,58 @@ def _file_fingerprint(path: Path) -> tuple[tuple[int, ...], bytes]:
     if _identity(path) != identity:
         raise ExportError("Архив изменился при чтении; перезапись запрещена.", path=path)
     return identity, digest
+
+
+def _rename_no_replace(staged: Path, target: Path) -> None:
+    """Atomically rename a completed ZIP without replacing a concurrent file.
+
+    os.rename is no-clobber on Windows, but REPLACES on POSIX. On Linux use
+    renameat2(RENAME_NOREPLACE) instead. Other platforms/filesystems fail
+    closed rather than exposing a partially copied ZIP at its final path.
+    """
+    if os.name == "nt":
+        os.rename(staged, target)
+        return
+    if sys.platform.startswith("linux"):
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is not None:
+            renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                                  ctypes.c_char_p, ctypes.c_uint]
+            renameat2.restype = ctypes.c_int
+            # AT_FDCWD=-100, RENAME_NOREPLACE=1 (Linux). Staging and target
+            # reside in the same directory, hence on the same filesystem.
+            if renameat2(-100, os.fsencode(staged), -100, os.fsencode(target), 1) == 0:
+                return
+            error = ctypes.get_errno()
+            if error not in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+                raise OSError(error, os.strerror(error), str(target))
+    raise OSError(
+        errno.ENOTSUP,
+        "Файловая система не поддерживает атомарное создание ZIP без замены. "
+        "Выберите другой каталог для выгрузки.",
+        str(target),
+    )
+
+
+def _publish_new_zip(staged: Path, target: Path) -> bool:
+    """Publish complete bytes only. Return True if staging was moved.
+
+    Unlike individual PDF export, there is deliberately NO exclusive-create
+    streaming-copy fallback: process termination could leave corrupt ZIP
+    contents visible at the chosen destination.
+    """
+    try:
+        os.link(staged, target)
+        return False  # The private stage remains for identity-checked cleanup.
+    except OSError as exc:
+        if (exc.errno not in _LINK_UNSUPPORTED
+                and getattr(exc, "winerror", None) not in (1, 50, 1314)):
+            raise
+    _rename_no_replace(staged, target)
+    return True
 
 
 def _stage_zip(target: Path, documents: list[tuple[str, bytes]]) -> tuple[Path, tuple[int, int]]:
@@ -221,7 +278,8 @@ def export_bulk_zip(service: CalculationService, year: int, month: int,
             stage = None
         else:
             # Publish without clobbering an archive created after preflight.
-            _publish_new_file(stage, target)
+            if _publish_new_zip(stage, target):
+                stage = None  # Atomic rename consumed the staged file.
         result.path = target
         result.successful = completed
     except Exception as exc:
@@ -242,15 +300,21 @@ def export_bulk_zip(service: CalculationService, year: int, month: int,
 
     if result.path is not None:
         try:
-            # A foreign process may replace or modify the published archive.
-            # Never assert "formed" if its bytes are no longer our ZIP.
+            # Failure to read, a deleted ZIP or differing bytes invalidate the
+            # claim that the published archive contains the prepared PDFs.
             if _sha256_file(target) != staged_digest:
                 raise ExportError(
-                    "Опубликованный ZIP изменился до записи статусов; отметки не обновлены.",
+                    "Опубликованный ZIP изменён; содержимое архива не подтверждено.",
                     path=target)
-            service.mark_documents_generated(revisions, require_active=True)
         except Exception as exc:
-            # Crucial: do not delete the already published ZIP or claim its
-            # logical documents have confirmed statuses.
-            result.metadata_error = exc
+            result.integrity_error = exc
+            result.unverified = result.successful
+            result.successful = []
+        else:
+            try:
+                service.mark_documents_generated(
+                    revisions, require_active=True, require_latest_ready=True)
+            except Exception as exc:
+                # ZIP is still valid but SQLite confirmation failed. Keep it.
+                result.metadata_error = exc
     return result
