@@ -211,7 +211,8 @@ class MainWindow(QMainWindow):
         heading = QLabel(title)
         heading.setProperty("kontaktHeadingSize", 27)
         detail = QLabel(subtitle)
-        detail.setStyleSheet("color:#657276;")
+        detail.setObjectName("subtitle")
+        detail.setWordWrap(True)
         group.addWidget(heading)
         group.addWidget(detail)
         return group
@@ -729,16 +730,33 @@ class MainWindow(QMainWindow):
     @database_error_dialog
     def new_calculation(self) -> None:
         dlg = CalculationDialog(self.service, self.database, year=self.year, month=self.month, parent=self)
-        if dlg.exec():
-            self._refresh_all()
+        dlg.exec()
+        self._refresh_all()
+
+    @database_error_dialog
+    def _open_calculation_id(self, calculation_id: int) -> None:
+        CalculationDialog(self.service, self.database, calculation_id=calculation_id, parent=self).exec()
+        self._refresh_all()
 
     @database_error_dialog
     def open_selected_calculation(self) -> None:
-        calc_id = self.selected_id(self.calc_table)
-        if calc_id is not None:
-            dlg = CalculationDialog(self.service, self.database, calculation_id=calc_id, parent=self)
-            dlg.exec()
-            self._refresh_all()
+        calculation_id = self.selected_id(self.calc_table)
+        if calculation_id is not None:
+            self._open_calculation_id(calculation_id)
+
+    @database_error_dialog
+    def _open_tenant_id(self, tenant_id: int, *, history: bool = False) -> None:
+        dialog = TenantDialog(self.service, self.database, tenant_id=tenant_id, parent=self)
+        if history:
+            tabs = dialog.findChild(QTabWidget)
+            if tabs is not None:
+                tabs.setCurrentIndex(1)
+        dialog.exec()
+        self._refresh_all()
+
+    @database_error_dialog
+    def _open_tenant_history(self, tenant_id: int) -> None:
+        self._open_tenant_id(tenant_id, history=True)
 
     @database_error_dialog
     def open_tenant_for_selected_calculation(self) -> None:
@@ -746,35 +764,32 @@ class MainWindow(QMainWindow):
         if calculation_id is None:
             return
         calc = self.service.get_calculation(calculation_id)
-        tenant_dialog = TenantDialog(
-            self.service, self.database, tenant_id=calc["tenant_id"], parent=self)
-        tenant_dialog.exec()
-        self._refresh_all()
+        self._open_tenant_id(calc["tenant_id"])
+
+    @database_error_dialog
+    def _export_calculation_id(self, calculation_id: int) -> None:
+        ExportDialog(self.service, self.database, calculation_id, self).exec()
+        self.refresh_calculations()
 
     @database_error_dialog
     def export_selected_calculation(self) -> None:
-        calc_id = self.selected_id(self.calc_table)
-        if calc_id is not None:
-            ExportDialog(self.service, self.database, calc_id, self).exec()
-            self.refresh_calculations()
+        calculation_id = self.selected_id(self.calc_table)
+        if calculation_id is not None:
+            self._export_calculation_id(calculation_id)
 
     @database_error_dialog
     def new_tenant(self) -> None:
-        if TenantDialog(self.service, self.database, parent=self).exec():
-            self._refresh_all()
+        TenantDialog(self.service, self.database, parent=self).exec()
+        self._refresh_all()
 
     @database_error_dialog
     def open_selected_tenant(self, archived: bool = False) -> None:
         tenant_id = self.selected_id(self.archive_table if archived else self.tenant_table)
         if tenant_id is not None:
-            TenantDialog(self.service, self.database, tenant_id=tenant_id, parent=self).exec()
-            self._refresh_all()
+            self._open_tenant_id(tenant_id)
 
     @database_error_dialog
-    def toggle_selected_archive(self, archived: bool) -> None:
-        tenant_id = self.selected_id(self.archive_table if archived else self.tenant_table)
-        if tenant_id is None:
-            return
+    def _toggle_archive_id(self, tenant_id: int, archived: bool) -> None:
         action = "восстановить" if archived else "переместить в архив"
         if QMessageBox.question(
             self, "Подтверждение", f"Вы уверены, что хотите {action} выбранного арендатора?",
@@ -787,6 +802,12 @@ class MainWindow(QMainWindow):
         if result is not CANCELLED:
             self._refresh_all()
             self.statusBar().showMessage("Изменение сохранено")
+
+    @database_error_dialog
+    def toggle_selected_archive(self, archived: bool) -> None:
+        tenant_id = self.selected_id(self.archive_table if archived else self.tenant_table)
+        if tenant_id is not None:
+            self._toggle_archive_id(tenant_id, archived)
 
 
     def closeEvent(self, event) -> None:
