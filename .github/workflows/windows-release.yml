@@ -34,12 +34,12 @@ jobs:
       - name: Build, test, execute frozen EXE twice, and create sanitized ZIP
         shell: pwsh
         env:
-          KONTAKT_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          KONTAKT_PR_HEAD_COMMIT: ${{ github.event.pull_request.head.sha || '' }}
         run: ./scripts/build_windows.ps1
       - name: Verify ZIP and commit-bound release manifest
         shell: pwsh
         env:
-          KONTAKT_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          KONTAKT_PR_HEAD_COMMIT: ${{ github.event.pull_request.head.sha || '' }}
         run: |
           $zip = "dist/kontakt-windows-x64.zip"
           if (-not (Test-Path $zip)) { throw "Release ZIP is missing." }
@@ -60,7 +60,14 @@ jobs:
           } finally {
             $entries.Dispose()
           }
-          python scripts/check_release_manifest.py --manifest dist/release-manifest.json --zip $zip --source-commit $env:KONTAKT_SOURCE_COMMIT
+          $checkout = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          $verify = @("--manifest", "dist/release-manifest.json", "--zip", $zip,
+                      "--build-checkout-commit", $checkout, "--build-tree-sha", $tree)
+          if ($env:KONTAKT_PR_HEAD_COMMIT) {
+            $verify += @("--pr-head-commit", $env:KONTAKT_PR_HEAD_COMMIT)
+          }
+          python scripts/check_release_manifest.py @verify
           if ($LASTEXITCODE -ne 0) { throw "Release manifest verification failed." }
           python scripts/validate_windows_bundle.py --dist dist/kontakt --zip $zip
           if ($LASTEXITCODE -ne 0) { throw "Release bundle allowlist verification failed." }
