@@ -166,6 +166,7 @@ class MainWindow(QMainWindow):
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(218)
+        self.sidebar = sidebar
         nav_layout = QVBoxLayout(sidebar)
         nav_layout.setContentsMargins(15, 26, 15, 20)
         nav_layout.setSpacing(8)
@@ -200,7 +201,8 @@ class MainWindow(QMainWindow):
         self.archive_page = self._build_tenants(archived=True)
         self.settings_page = SettingsPage(self.service)
         for page in (self.calc_page, self.tenant_page, self.archive_page, self.settings_page):
-            self.pages.addWidget(page)
+            self.pages.addWidget(self._scroll_page(page))
+        self._reflow_layouts()
         self.navigate("calculations")
         self.statusBar().showMessage("Данные сохраняются локально")
 
@@ -339,39 +341,133 @@ class MainWindow(QMainWindow):
         page = QWidget()
         page.setObjectName("workspace")
         body = QVBoxLayout(page)
-        body.setContentsMargins(12, 12, 12, 12)
-        body.setSpacing(16)
+        body.setContentsMargins(14, 14, 14, 20)
+        body.setSpacing(17)
+        eyebrow = QLabel("СПРАВОЧНИК")
+        eyebrow.setObjectName("eyebrow")
+        body.addWidget(eyebrow)
+        body.addLayout(self._heading(
+            "Архив арендаторов" if archived else "Арендаторы",
+            "Сохранённые карточки, договоры и история. Можно восстановить."
+            if archived else "Организации, договоры, первоначальные показания и история."))
+
         header = QHBoxLayout()
-        header.addLayout(self._heading("Архив" if archived else "Арендаторы",
-                                      "История сохраняется при архивировании" if archived
-                                      else "Реквизиты, договоры и история показаний"))
-        header.addStretch()
-        if not archived:
+        if archived:
+            header.addWidget(button("К активным арендаторам", lambda: self.navigate("tenants"),
+                                    primary=True))
+        else:
             header.addWidget(button("Открыть архив", lambda: self.navigate("archive")))
             header.addWidget(button("Добавить арендатора", self.new_tenant, primary=True))
-        else:
-            header.addWidget(button("К арендаторам", lambda: self.navigate("tenants")))
+        header.addStretch()
         body.addLayout(header)
+
         frame, inside = panel()
+        title = QLabel("Карточки в архиве" if archived else "Карточки арендаторов")
+        title.setProperty("kontaktHeadingSize", 20)
+        inside.addWidget(title)
+        count = QLabel()
+        count.setObjectName("panelDescription")
+        inside.addWidget(count)
         search = QLineEdit()
-        search.setPlaceholderText("Поиск по названию или ИНН…")
+        search.setPlaceholderText("Поиск по названию, ИНН или договору…")
         search.textChanged.connect(lambda _t, is_archive=archived: self.refresh_tenants(is_archive))
         inside.addWidget(search)
-        listing = table(["ID", "Организация", "ИНН", "Договор", "Начальное показание", "Изменён"])
-        listing.doubleClicked.connect(lambda _index, is_archive=archived: self.open_selected_tenant(is_archive))
-        inside.addWidget(listing, 1)
-        toolbar = QHBoxLayout()
-        toolbar.addWidget(button("Открыть карточку", lambda: self.open_selected_tenant(archived)))
-        toolbar.addWidget(button("Восстановить" if archived else "В архив",
-                                 lambda: self.toggle_selected_archive(archived)))
-        toolbar.addStretch()
-        inside.addLayout(toolbar)
+
+        # A non-visible selection model preserves keyboard/bulk selection APIs
+        # used by the already tested handlers. The *presented* UI is cards only.
+        listing = QTableWidget(0, 1, page)
+        listing.setVisible(False)
+        inside.addWidget(listing)
+
+        cards_host = QWidget()
+        cards_host.setObjectName("cardsHost")
+        cards_layout = QGridLayout(cards_host)
+        cards_layout.setContentsMargins(0, 3, 0, 4)
+        cards_layout.setSpacing(13)
+        empty = QLabel()
+        empty.setObjectName("mutedLabel")
+        empty.setWordWrap(True)
+        inside.addWidget(empty)
+        inside.addWidget(cards_host, 1)
         body.addWidget(frame, 1)
         if archived:
             self.archive_search, self.archive_table = search, listing
+            self.archive_cards_layout, self.archive_cards_host = cards_layout, cards_host
+            self.archive_count, self.archive_empty = count, empty
+            self._archive_cards = []
         else:
             self.tenant_search, self.tenant_table = search, listing
+            self.tenant_cards_layout, self.tenant_cards_host = cards_layout, cards_host
+            self.tenant_count, self.tenant_empty = count, empty
+            self._tenant_cards = []
         return page
+
+    @staticmethod
+    def _scroll_page(widget: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName("pageScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(widget)
+        return scroll
+
+    def _clear_tenant_cards(self, archived: bool) -> None:
+        widgets = self._archive_cards if archived else self._tenant_cards
+        layout = self.archive_cards_layout if archived else self.tenant_cards_layout
+        while layout.count():
+            layout.takeAt(0)
+        for widget in widgets:
+            widget.hide()
+            widget.deleteLater()
+        if archived:
+            self._archive_cards = []
+        else:
+            self._tenant_cards = []
+
+    def _relayout_tenant_cards(self, archived: bool) -> None:
+        widgets = self._archive_cards if archived else self._tenant_cards
+        layout = self.archive_cards_layout if archived else self.tenant_cards_layout
+        host = self.archive_cards_host if archived else self.tenant_cards_host
+        # Work from the viewport width rather than the previous column geometry,
+        # so the grid can really shrink when the user makes the window narrower.
+        available = max(230, self.pages.width() - 110)
+        scale = max(1, self.font().pointSizeF() / 10)
+        minimum = int(285 * scale)
+        columns = max(1, min(4, (available + 13) // (minimum + 13)))
+        while layout.count():
+            layout.takeAt(0)
+        for column in range(4):
+            layout.setColumnStretch(column, 1 if column < columns else 0)
+        for index, widget in enumerate(widgets):
+            layout.addWidget(widget, index // columns, index % columns)
+        host.updateGeometry()
+
+    def _reflow_layouts(self) -> None:
+        if not hasattr(self, "kpi_layout") or not hasattr(self, "tenant_cards_layout"):
+            return
+        if getattr(self, "_reflowing", False):
+            return
+        self._reflowing = True
+        try:
+            scale = max(1, self.font().pointSizeF() / 10)
+            if hasattr(self, "sidebar"):
+                self.sidebar.setFixedWidth(min(350, max(205, int(218 * scale))))
+            columns = 4 if self.pages.width() >= 1140 * scale else (
+                2 if self.pages.width() >= 600 * scale else 1)
+            while self.kpi_layout.count():
+                self.kpi_layout.takeAt(0)
+            for column in range(4):
+                self.kpi_layout.setColumnStretch(column, 1 if column < columns else 0)
+            for index, card in enumerate(self.kpi_cards.values()):
+                self.kpi_layout.addWidget(card, index // columns, index % columns)
+            self._relayout_tenant_cards(False)
+            self._relayout_tenant_cards(True)
+        finally:
+            self._reflowing = False
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reflow_layouts()
 
     def navigate(self, page: str) -> None:
         names = {"calculations": 0, "tenants": 1, "archive": 2, "settings": 3}
