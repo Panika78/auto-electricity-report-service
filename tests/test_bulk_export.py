@@ -168,6 +168,45 @@ class BulkZipTests(unittest.TestCase):
         self.assertEqual(self.service.document_status(cid, "act"), "not_created")
         self.assertFalse(list(self.root.glob(".kontakt-zip-*")))
 
+    def test_concurrent_change_of_existing_archive_prevents_overwrite(self):
+        cid = self.calc(self.tenant())
+        target = self.root / "changed.zip"
+        target.write_bytes(b"ORIGINAL")
+        from app.documents import bulk
+        render = bulk._RENDERERS["act"]
+
+        def foreign_edit(snapshot):
+            target.write_bytes(b"OTHER WRITER")
+            return render(snapshot)
+
+        with mock.patch.dict(bulk._RENDERERS, {"act": foreign_edit}):
+            result = export_bulk_zip(self.service, 2026, 10, target,
+                                     kinds=("act",), overwrite=True)
+        self.assertIsNone(result.path)
+        self.assertIsNotNone(result.publication_error)
+        self.assertEqual(target.read_bytes(), b"OTHER WRITER")
+        self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+
+    def test_foreign_change_after_publication_does_not_mark_success(self):
+        cid = self.calc(self.tenant())
+        target = self.root / "foreign.zip"
+        from app.documents import bulk
+        original_publish = bulk._publish_new_file
+
+        def foreign_edit(staged, published):
+            original_publish(staged, published)
+            published.write_bytes(b"FOREIGN BYTES")
+
+        with mock.patch.object(bulk, "_publish_new_file", side_effect=foreign_edit):
+            result = export_bulk_zip(self.service, 2026, 10, target,
+                                     kinds=("act",))
+        self.assertEqual(result.path, target)
+        self.assertTrue(target.exists())
+        self.assertEqual(target.read_bytes(), b"FOREIGN BYTES")
+        self.assertIsNotNone(result.metadata_error)
+        self.assertFalse(result.statuses_confirmed)
+        self.assertEqual(self.service.document_status(cid, "act"), "not_created")
+
     def test_new_zip_publish_failure_does_not_report_success(self):
         cid = self.calc(self.tenant())
         target = self.root / "unwritable.zip"
