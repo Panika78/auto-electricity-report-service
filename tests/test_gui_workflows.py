@@ -1152,6 +1152,45 @@ class NativeWorkflowTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_initial_reading_prefill_tracks_tenant_without_losing_auto_source(self):
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.forms import CalculationDialog
+        first = self._tenant(
+            initial_reading="100", initial_reading_date="2026-09-01")
+        second = self.service.create_tenant(
+            name="ООО Второй", initial_reading="200",
+            initial_reading_date="2026-09-01")
+        self.service.set_tariff(2026, 10, "5")
+        editor = CalculationDialog(self.service, self.database, year=2026, month=10)
+        try:
+            self.assertEqual(editor.tenant_picker.currentData(), first["id"])
+            self.assertEqual(editor.start_edit.text(), "100")
+            self.assertIn("Автоподстановка", editor.start_hint.text())
+            editor.tenant_picker.setCurrentIndex(
+                editor.tenant_picker.findData(second["id"]))
+            self.assertEqual(editor.start_edit.text(), "200")
+            editor.end_edit.setText("230")
+            self.assertEqual(editor.consumption.text(), "30 кВт·ч")
+            editor._create()
+            stored = self.service.get_calculation(editor.calculation_id)
+            self.assertEqual(stored["start_reading"], Decimal("200"))
+            self.assertEqual(stored["start_reading_source"], "initial")
+            self.assertEqual(stored["total_amount"], Decimal("150.00"))
+        finally:
+            editor.close()
+        manual = CalculationDialog(self.service, self.database, year=2026, month=10)
+        try:
+            manual.start_edit.setText("110")  # explicitly differs from proposal
+            manual.end_edit.setText("140")
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.Yes):
+                manual._create()
+            stored = self.service.get_calculation(manual.calculation_id)
+            self.assertEqual(stored["start_reading"], Decimal("110"))
+            self.assertEqual(stored["start_reading_source"], "manual")
+        finally:
+            manual.close()
+
     def test_live_preview_reacts_to_readings_and_inline_manual_checkboxes(self):
         from app.ui.forms import CalculationDialog
         from app.data import database as db
