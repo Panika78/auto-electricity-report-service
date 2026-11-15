@@ -7,7 +7,7 @@ from decimal import Decimal
 from functools import wraps
 
 from PySide6.QtCore import QDate, Qt, QLocale
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDateEdit, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QStackedWidget,
@@ -610,12 +610,19 @@ class MainWindow(QMainWindow):
             for calc, tenant, checked, act, invoice in visible:
                 row = self.calc_table.rowCount()
                 self.calc_table.insertRow(row)
-                self.calc_table.setRowHeight(row, max(63, self.fontMetrics().height() * 3 + 12))
                 tenant_name = tenant.get("name") or f"Арендатор {calc['tenant_id']}"
                 contract = tenant.get("contract_number") or "не указан"
                 contract_text = f"Договор {contract}"
                 if tenant.get("is_archived"):
                     contract_text += " · архив"
+                metrics = QFontMetrics(self.calc_table.font())
+                title_height = metrics.boundingRect(
+                    0, 0, 260, 10_000, int(Qt.TextFlag.TextWordWrap), tenant_name).height()
+                contract_height = metrics.boundingRect(
+                    0, 0, 260, 10_000, int(Qt.TextFlag.TextWordWrap), contract_text).height()
+                self.calc_table.setRowHeight(
+                    row, max(65, title_height + contract_height + 26,
+                             self.fontMetrics().height() * 3 + 12))
                 name_item = item(tenant_name, tooltip=tenant_name + "\n" + contract_text)
                 name_item.setData(Qt.ItemDataRole.UserRole, calc["id"])
                 name_item.setData(META_ROLE, contract_text)
