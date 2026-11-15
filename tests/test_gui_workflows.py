@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
@@ -1204,7 +1205,7 @@ class NativeWorkflowTests(unittest.TestCase):
                 editor._save_manual("total_amount")
                 question.assert_called_once()
             changed = self.service.get_calculation(calc["id"])
-            self.assertEqual(str(changed["total_amount"]), "75.25")
+            self.assertEqual(changed["total_amount"], Decimal("75.25"))
             self.assertTrue(changed["manual_amount"])
             self.assertTrue(editor.manual_amount_check.isChecked())
             self.assertEqual(editor.amount.text(), "75,25 ₽")
@@ -1213,7 +1214,7 @@ class NativeWorkflowTests(unittest.TestCase):
             editor.manual_amount_check.setChecked(False)
             restored = self.service.get_calculation(calc["id"])
             self.assertFalse(restored["manual_amount"])
-            self.assertEqual(str(restored["total_amount"]), "50.00")
+            self.assertEqual(restored["total_amount"], Decimal("50.00"))
             self.assertFalse(editor.manual_amount_edit.isEnabled())
             self.assertEqual(editor.amount.text(), "50,00 ₽")
             reopened = CalculationDialog(
@@ -1246,7 +1247,7 @@ class NativeWorkflowTests(unittest.TestCase):
             data = self.service.get_calculation(calc["id"])
             self.assertTrue(data["manual_consumption"])
             self.assertFalse(data["manual_amount"])
-            self.assertEqual(str(data["total_amount"]), "60.00")
+            self.assertEqual(data["total_amount"], Decimal("60.00"))
             self.assertTrue(editor.manual_consumption_check.isChecked())
             self.assertFalse(editor.manual_amount_check.isChecked())
             # Rejected manual edit must not change SQLite or discard input.
@@ -1258,14 +1259,14 @@ class NativeWorkflowTests(unittest.TestCase):
                 editor._save_manual("total_amount")
             self.assertIn("total_amount", editor.pending)
             self.assertEqual(editor.manual_amount_edit.text(), "120")
-            self.assertEqual(str(self.service.get_calculation(calc["id"])["total_amount"]), "60.00")
+            self.assertEqual(self.service.get_calculation(calc["id"])["total_amount"], Decimal("60.00"))
             editor.manual_amount_check.setChecked(False)
             self.assertNotIn("total_amount", editor.pending)
             editor.manual_consumption_check.setChecked(False)
             original = self.service.get_calculation(calc["id"])
             self.assertFalse(original["manual_consumption"])
-            self.assertEqual(str(original["consumption"]), "10.000")
-            self.assertEqual(str(original["total_amount"]), "50.00")
+            self.assertEqual(original["consumption"], Decimal("10.000"))
+            self.assertEqual(original["total_amount"], Decimal("50.00"))
         finally:
             editor.close()
 
@@ -1290,8 +1291,8 @@ class NativeWorkflowTests(unittest.TestCase):
             saved = self.service.get_calculation(editor.calculation_id)
             self.assertTrue(saved["manual_consumption"])
             self.assertTrue(saved["manual_amount"])
-            self.assertEqual(str(saved["consumption"]), "14.000")
-            self.assertEqual(str(saved["total_amount"]), "90.00")
+            self.assertEqual(saved["consumption"], Decimal("14.000"))
+            self.assertEqual(saved["total_amount"], Decimal("90.00"))
             self.assertFalse(editor.pending)
             self.assertEqual(editor.amount.text(), "90,00 ₽")
         finally:
@@ -1320,7 +1321,7 @@ class NativeWorkflowTests(unittest.TestCase):
             self.assertTrue(editor.manual_amount_check.isChecked())
             self.assertTrue(editor.manual_amount_edit.isEnabled())
             self.assertTrue(self.service.get_calculation(calc["id"])["manual_amount"])
-            self.assertEqual(str(self.service.get_calculation(calc["id"])["total_amount"]), "85.00")
+            self.assertEqual(self.service.get_calculation(calc["id"])["total_amount"], Decimal("85.00"))
         finally:
             editor.close()
 
