@@ -587,13 +587,161 @@ class CalculationDialog(QDialog):
             proposal = self.service.suggest_start_reading(
                 self.tenant_picker.currentData(), self.year, self.month,
                 self.date_start.date().toString("yyyy-MM-dd"))
+            self._start_proposal = proposal
             if proposal.value is None:
-                self.start_hint.setText("Автоматический источник не найден. Укажите показание вручную.")
+                self.start_hint.setText(
+                    "Автоматический источник не найден. Укажите показание вручную.")
             else:
                 suffix = " (потребуется подтверждение)" if proposal.requires_confirmation else ""
-                self.start_hint.setText("Автоподстановка: " + show_number(proposal.value) + suffix)
+                self.start_hint.setText(
+                    "Автоподстановка при создании: " + show_number(proposal.value)
+                    + suffix + ". Начальные показания можно изменить вручную.")
         except (LookupError, ValueError) as error:
+            self._start_proposal = None
             self.start_hint.setText(str(error))
+        if hasattr(self, "preview_status"):
+            self._update_preview()
+
+    def _update_preview(self, *_ignored) -> None:
+        """Read the visible draft and calculate live with pure Decimal domain code.
+
+        This must never write SQLite or claim that a draft is already saved.
+        The backend service remains authoritative for persistence and export.
+        """
+        if self._filling or not hasattr(self, "preview_status"):
+            return
+        tariff = self._current_tariff
+        try:
+            start = parse_number(self.start_edit.text(), 3, optional=True)
+            end = parse_number(self.end_edit.text(), 3, optional=True)
+            if start is None and self.calculation_id is None and self._start_proposal:
+                start = self._start_proposal.value
+            use_consumption = self.manual_consumption_check.isChecked()
+            use_amount = self.manual_amount_check.isChecked()
+            consumption = (parse_number(self.manual_consumption_edit.text(), 3)
+                           if use_consumption else None)
+            amount = (parse_number(self.manual_amount_edit.text(), 2)
+                      if use_amount else None)
+            consumption, amount = recalculate(
+                start, end, tariff, consumption=consumption, amount=amount,
+                manual_consumption=use_consumption, manual_amount=use_amount)
+            draft = {
+                "year": self.year, "month": self.month,
+                "period_start": self.date_start.date().toString("yyyy-MM-dd"),
+                "period_end": self.date_end.date().toString("yyyy-MM-dd"),
+                "start_reading": start, "end_reading": end,
+                "consumption": consumption, "total_amount": amount,
+                "manual_consumption": use_consumption, "manual_amount": use_amount,
+            }
+            validation = validate_calculation(draft, tariff)
+            self.consumption.setText(display_number(consumption, 3, "кВт·ч", trim=True))
+            self.tariff_label.setText(display_number(tariff, 4, "₽", trim=True))
+            self.amount.setText(display_number(amount, 2, "₽"))
+            self.preview_status.setText("Готов" if validation.ready else "Черновик")
+            self.preview_status.set_tone("ok" if validation.ready else "warn")
+            details = validation.errors + validation.warnings
+            self.preview_details.setText(
+                ("Предпросмотр, не сохранено. " if self.calculation_id is None or self.pending else "")
+                + ("; ".join(details) if details else "Все обязательные значения указаны."))
+        except (ValueError, TypeError, ArithmeticError) as error:
+            self.consumption.setText("—")
+            self.tariff_label.setText(display_number(tariff, 4, "₽", trim=True))
+            self.amount.setText("—")
+            self.preview_status.setText("Некорректный ввод")
+            self.preview_status.set_tone("bad")
+            self.preview_details.setText(
+                "Предварительный расчёт недоступен: " + str(error))
+
+    def _manual_controls(self, field: str):
+        if field == "consumption":
+            return self.manual_consumption_check, self.manual_consumption_edit, 3
+        if field == "total_amount":
+            return self.manual_amount_check, self.manual_amount_edit, 2
+        raise ValueError("Неизвестная ручная корректировка.")
+
+    @guard_database_errors("Ошибка базы данных")
+    def _manual_toggled(self, field: str, enabled: bool) -> None:
+        checkbox, editor, _places = self._manual_controls(field)
+        editor.setEnabled(enabled)
+        if self._filling:
+            return
+        current = self._loaded_calculation
+        if enabled:
+            if not editor.text().strip():
+                # As in HTML, suggest the current automatic value, but do not
+                # write anything until a meaningful manual edit is confirmed.
+                suggested = (self.consumption.text().split(" ", 1)[0]
+                             if field == "consumption" else self.amount.text().split(" ", 1)[0])
+                if suggested != "—":
+                    editor.setText(suggested.replace("\u202f", ""))
+            if self.calculation_id is not None:
+                self.pending.add(field)
+            self._update_preview()
+            return
+        if self.calculation_id is not None and current and current[
+                "manual_consumption" if field == "consumption" else "manual_amount"]:
+            if self.pending - {field}:
+                QMessageBox.warning(
+                    self, "Несохранённые изменения",
+                    "Завершите другие изменения перед сбросом ручной корректировки.")
+                checkbox.blockSignals(True)
+                checkbox.setChecked(True)
+                checkbox.blockSignals(False)
+                editor.setEnabled(True)
+                return
+            result = run_confirmed(
+                self, lambda _flags: self.service.reset_manual_override(
+                    self.calculation_id, field))
+            if result is CANCELLED:
+                checkbox.blockSignals(True)
+                checkbox.setChecked(True)
+                checkbox.blockSignals(False)
+                editor.setEnabled(True)
+                return
+            self.pending.discard(field)
+            self._refresh()
+            return
+        self.pending.discard(field)
+        editor.clear()
+        self._update_preview()
+
+    @guard_database_errors("Ошибка базы данных")
+    def _save_manual(self, field: str) -> None:
+        checkbox, editor, places = self._manual_controls(field)
+        if self._filling or self.calculation_id is None or not checkbox.isChecked():
+            return
+        if field not in self.pending:
+            return
+        if self.pending - {"consumption", "total_amount", field}:
+            self.status.setText(
+                "Завершите изменения показаний или дат перед ручной корректировкой.")
+            return
+        try:
+            value = parse_number(editor.text(), places)
+        except (ValueError, TypeError) as error:
+            show_error(self, error, "Некорректное ручное значение")
+            return
+        current = self.service.get_calculation(self.calculation_id)
+        flag = "manual_consumption" if field == "consumption" else "manual_amount"
+        if value == current[field]:
+            # The service deliberately does not flag an unchanged automatic
+            # value as a manual correction. Never claim otherwise.
+            self.pending.discard(field)
+            if not current[flag]:
+                checkbox.blockSignals(True)
+                checkbox.setChecked(False)
+                checkbox.blockSignals(False)
+                editor.setEnabled(False)
+                editor.clear()
+            self._update_preview()
+            return
+        result = run_confirmed(self, lambda flags: self.service.update_calculation(
+            self.calculation_id, **{field: value}, **flags))
+        if result is CANCELLED:
+            self.status.setText("Ручная корректировка не сохранена. Можно исправить и повторить.")
+            return
+        self.pending.discard(field)
+        self._refresh()
 
     @guard_database_errors("Ошибка базы данных")
     def _create(self) -> None:
