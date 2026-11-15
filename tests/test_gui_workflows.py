@@ -879,6 +879,8 @@ class NativeWorkflowTests(unittest.TestCase):
             card = next(card for card in window._tenant_cards if card.tenant_id == one["id"])
             self.assertIsInstance(card, TenantCard)
             self.assertIn("В архив", [b.text() for b in card.findChildren(QPushButton)])
+            self.assertTrue(all(not control.icon().isNull()
+                                for control in card.findChildren(QPushButton)))
             self.assertTrue(any(long_name in label.text() for label in
                                 card.findChildren(__import__("PySide6.QtWidgets",
                                                             fromlist=["QLabel"]).QLabel)))
@@ -995,6 +997,35 @@ class NativeWorkflowTests(unittest.TestCase):
             self.assertFalse(window.bulk_action.icon().isNull())
             self.assertFalse(window.fit_columns_button.icon().isNull())
             self.assertFalse(window.bulk_action.isEnabled())
+        finally:
+            window.close()
+
+    def test_manual_company_column_resize_reflows_long_names(self):
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QDate
+        from app.ui.main_window import MainWindow
+        tenant = self.service.create_tenant(
+            name="ООО " + "Очень длинное название арендатора " * 10,
+            contract_number="Очень длинный номер договора / " * 4)
+        self.service.create_calculation(tenant["id"], 2026, 10)
+        window = MainWindow(self.database)
+        try:
+            window.resize(1360, 820)
+            window.show()
+            window.period_picker.setDate(QDate(2026, 10, 1))
+            QApplication.processEvents()
+            table = window.calc_table
+            self.assertEqual(table.rowCount(), 1)
+            old_height = table.rowHeight(0)
+            table.setColumnWidth(0, 90)
+            self.assertFalse(window._calc_columns_auto)
+            narrow_height = table.rowHeight(0)
+            self.assertGreater(narrow_height, old_height)
+            self.assertIn("Очень длинное название", table.item(0, 0).toolTip())
+            window.reset_calculation_columns()
+            QApplication.processEvents()
+            self.assertTrue(window._calc_columns_auto)
+            self.assertLessEqual(table.rowHeight(0), narrow_height)
         finally:
             window.close()
 
