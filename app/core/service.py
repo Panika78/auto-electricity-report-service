@@ -488,9 +488,20 @@ class CalculationService:
                                  "tenant": tenant["updated_at"], "performer": settings["updated_at"],
                                  "document": document["updated_at"] if document else None}}
 
+    @staticmethod
+    def _latest_ready_for_bulk(conn: Any, tenant_id: int, year: int, month: int,
+                               tariff: Mapping[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """Use the same ready + updated_at/id ordering for selection and commit."""
+        calculations = db.list_calculations(conn, tenant_id=tenant_id, year=year, month=month)
+        rate = tariff["rate"] if tariff else None
+        latest = next((item for item in calculations
+                       if validate_calculation(item, rate).ready), None)
+        return calculations, latest
+
     def mark_documents_generated(
             self, revisions: Mapping[int, Mapping[str, str | None]], *,
-            require_active: bool = False) -> dict[int, dict[str, Any]]:
+            require_active: bool = False,
+            require_latest_ready: bool = False) -> dict[int, dict[str, Any]]:
         """Confirm an entire published batch in ONE SQLite transaction.
 
         Verify all snapshots before updating any status: a stale document or
@@ -500,6 +511,7 @@ class CalculationService:
         if not revisions:
             return {}
         with self.database.transaction() as conn:
+            checked_latest: dict[tuple[int, int, int], int] = {}
             for document_id, expected in revisions.items():
                 document = db.get_document(conn, document_id)
                 if document is None:
@@ -518,6 +530,17 @@ class CalculationService:
                         or (require_active and tenant["is_archived"])):
                     raise ValueError(
                         "Данные изменились во время генерации; статусы пакета не обновлены.")
+                if require_latest_ready:
+                    key = (tenant["id"], calc["year"], calc["month"])
+                    if key not in checked_latest:
+                        _, latest = self._latest_ready_for_bulk(
+                            conn, tenant["id"], calc["year"], calc["month"], tariff)
+                        checked_latest[key] = latest["id"] if latest else -1
+                    if (checked_latest[key] != calc["id"]
+                            or calc["consumption"] == 0):
+                        raise ValueError(
+                            "Последний готовый расчёт арендатора изменился во время "
+                            "массовой выгрузки; статусы пакета не обновлены.")
             for document_id in revisions:
                 db.update_document(conn, document_id, is_current=True,
                                    last_generated_at=db._timestamp())
@@ -537,9 +560,8 @@ class CalculationService:
         with self.database.connection() as conn:
             tariff = queries.month_tariff(conn, year, month)
             for tenant in db.list_tenants(conn):
-                calculations = db.list_calculations(conn, tenant_id=tenant["id"], year=year, month=month)
-                latest = next((c for c in calculations if validate_calculation(
-                    c, tariff["rate"] if tariff else None).ready), None)
+                calculations, latest = self._latest_ready_for_bulk(
+                    conn, tenant["id"], year, month, tariff)
                 if not calculations:
                     skipped.append({"tenant_id": tenant["id"], "reason": "no_calculation",
                                     "errors": ("Расчёты за выбранный месяц отсутствуют.",)})
