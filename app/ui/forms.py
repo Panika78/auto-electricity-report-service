@@ -731,6 +731,12 @@ class CalculationDialog(QDialog):
             self.status.setText(
                 "Завершите изменения показаний или дат перед ручной корректировкой.")
             return
+        if field == "total_amount" and "consumption" in self.pending:
+            # The consumption write resets a manual amount in the domain.
+            # Do not save an amount against a still-unsaved consumption draft.
+            self.status.setText(
+                "Сначала сохраните ручной расход, затем ручную сумму.")
+            return
         try:
             value = parse_number(editor.text(), places)
         except (ValueError, TypeError) as error:
