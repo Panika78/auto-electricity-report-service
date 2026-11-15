@@ -1,6 +1,7 @@
 """Запуск настольного приложения: python -m app.main."""
 
 import sqlite3
+import sys
 from pathlib import Path
 
 from app.data.database import Database
@@ -44,4 +45,9 @@ def main(db_path: Path | str | None = None) -> int:
 
 
 if __name__ == "__main__":
+    if "--release-smoke" in sys.argv:
+        # An explicit, isolated QA entrypoint for exercising the *frozen* executable.
+        # It refuses to run without a dedicated test profile (see release_smoke.py).
+        from app.release_smoke import run_release_smoke
+        raise SystemExit(run_release_smoke())
     raise SystemExit(main())
