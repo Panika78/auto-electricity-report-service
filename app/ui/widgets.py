@@ -229,7 +229,10 @@ class StatusChip(QLabel):
         self.setToolTip(text)
 
     def set_tone(self, tone: str) -> None:
-        """Update the same compact visual badge for a live draft preview."""
+        """Update the badge only when its tone changes (safe Qt ownership)."""
+        if getattr(self, "_tone", None) == tone:
+            return
+        self._tone = tone
         background, ink = self.COLORS.get(tone, self.COLORS["neutral"])
         self.setStyleSheet(
             f"background:{background};color:{ink};padding:5px 9px;"
