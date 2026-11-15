@@ -663,7 +663,12 @@ class NativeWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 self.service.get_calculation(calc["id"])["period_end"], "2026-11-23")
         finally:
-            editor.close()
+            # The rejected dates remain unsaved; closing must explicitly
+            # confirm discarding the pending draft rather than raising a
+            # headless modal prompt.
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.Yes):
+                editor.close()
         new = CalculationDialog(self.service, self.database, year=2026, month=11)
         try:
             for picker in (new.date_start, new.date_end):
