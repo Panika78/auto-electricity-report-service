@@ -804,6 +804,164 @@ class NativeWorkflowTests(unittest.TestCase):
             self.assertEqual(db.get_settings(conn)["performer_name"], "Исходный исполнитель")
         page.close()
 
+    def test_dashboard_metrics_separate_document_states_and_russian_dates(self):
+        from PySide6.QtCore import QDate, Qt
+        from app.ui.main_window import MainWindow
+        from app.ui.widgets import ChipDelegate, CompanyDelegate
+        from app.data import database as db
+        long_name = "ООО " + "Очень длинное название организации " * 5
+        first = self.service.create_tenant(
+            name=long_name, inn="7700000000", contract_number="Д-2026/53")
+        second = self.service.create_tenant(name="ЗАО Второй", contract_number="Д-54")
+        self.service.set_tariff(2026, 10, "5")
+        first_calc = self.service.create_calculation(
+            first["id"], 2026, 10, start_reading="10", end_reading="20")
+        self.service.create_calculation(
+            second["id"], 2026, 10, start_reading="25", end_reading="30")
+        with self.database.transaction() as conn:
+            db.create_document(conn, calculation_id=first_calc["id"], type="act",
+                               number=1, document_date="2026-11-01", is_current=False,
+                               last_generated_at="2026-11-01T10:00:00")
+        window = MainWindow(self.database)
+        try:
+            window.period_picker.setDate(QDate(2026, 10, 1))
+            self.assertEqual(window.period_title.text(), "Октябрь 2026")
+            self.assertEqual(window.kpi_cards["active"].value.text(), "2")
+            self.assertEqual(window.kpi_cards["ready"].value.text(), "2 / 2")
+            self.assertIn("75,00 ₽", window.kpi_cards["total"].value.text())
+            self.assertEqual(window.kpi_cards["stale"].value.text(), "1")
+            self.assertEqual(window.calc_table.rowCount(), 2)
+            self.assertIsInstance(window.calc_table.itemDelegateForColumn(0), CompanyDelegate)
+            self.assertIsInstance(window.calc_table.itemDelegateForColumn(7), ChipDelegate)
+            self.assertEqual(window.calc_table.columnCount(), 11)
+            names = [window.calc_table.item(i, 0).text()
+                     for i in range(window.calc_table.rowCount())]
+            self.assertIn(long_name, names)
+            row = names.index(long_name)
+            self.assertIn("Д-2026/53", window.calc_table.item(row, 0).data(
+                int(Qt.ItemDataRole.UserRole) + 1))
+            self.assertIn("01.10.2026", window.calc_table.item(row, 1).text())
+            self.assertNotIn("2026-10-", window.calc_table.item(row, 1).text())
+            self.assertEqual(window.calc_table.item(row, 8).text(), "Обновить")
+            self.assertEqual(window.calc_table.item(row, 9).text(), "Не сформирован")
+            self.assertEqual(window.calc_table.item(row, 8).background().style(),
+                             Qt.BrushStyle.NoBrush)
+            self.assertGreater(window.calc_table.rowHeight(row), 80)
+            self.assertEqual(len(window.calc_table.cellWidget(row, 10).findChildren(
+                __import__("PySide6.QtWidgets", fromlist=["QPushButton"]).QPushButton)), 2)
+            window.calc_search.setText("Д-2026/53")
+            self.assertEqual(window.calc_table.rowCount(), 1)
+            window.calc_search.clear()
+            window.calc_sort.setCurrentIndex(2)  # descending amount
+            self.assertEqual(window.calc_table.item(0, 0).text(), long_name)
+            self.assertFalse(window.bulk_action.isEnabled())
+        finally:
+            window.close()
+
+    def test_tenant_cards_are_responsive_real_and_archivable(self):
+        from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
+        from PySide6.QtCore import Qt
+        from app.ui.main_window import MainWindow
+        from app.ui.widgets import TenantCard
+        from app.data import database as db
+        long_name = "ООО " + "Длинное название договора и организации " * 5
+        one = self.service.create_tenant(
+            name=long_name, inn="1234567890", contract_number="К-9876",
+            initial_reading="123456.789")
+        two = self._tenant()
+        window = MainWindow(self.database)
+        try:
+            window.show()
+            window.resize(1440, 850)
+            QApplication.processEvents()
+            window.navigate("tenants")
+            self.assertEqual(len(window._tenant_cards), 2)
+            card = next(card for card in window._tenant_cards if card.tenant_id == one["id"])
+            self.assertIsInstance(card, TenantCard)
+            self.assertIn("В архив", [b.text() for b in card.findChildren(QPushButton)])
+            self.assertTrue(any(long_name in label.text() for label in
+                                card.findChildren(__import__("PySide6.QtWidgets",
+                                                            fromlist=["QLabel"]).QLabel)))
+            self.assertFalse(window.tenant_table.isVisible())
+            wide_positions = [window.tenant_cards_layout.getItemPosition(i)[:2]
+                              for i in range(window.tenant_cards_layout.count())]
+            window.resize(790, 590)
+            QApplication.processEvents()
+            window._reflow_layouts()
+            narrow_positions = [window.tenant_cards_layout.getItemPosition(i)[:2]
+                                for i in range(window.tenant_cards_layout.count())]
+            self.assertEqual(len(wide_positions), 2)
+            self.assertEqual(len(narrow_positions), 2)
+            self.assertTrue(all(row >= 0 and col >= 0 for row, col in narrow_positions))
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.Yes):
+                button = next(b for b in card.findChildren(QPushButton)
+                              if b.text() == "В архив")
+                button.click()
+            with self.database.connection() as conn:
+                self.assertEqual(db.get_tenant(conn, one["id"])["is_archived"], 1)
+            self.assertEqual(window.tenant_table.rowCount(), 1)
+            self.assertEqual(window.archive_table.rowCount(), 1)
+            window.navigate("archive")
+            self.assertTrue(any(c.tenant_id == one["id"] for c in window._archive_cards))
+            archived_card = window._archive_cards[0]
+            self.assertIn("Восстановить",
+                          [b.text() for b in archived_card.findChildren(QPushButton)])
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.Yes):
+                next(b for b in archived_card.findChildren(QPushButton)
+                     if b.text() == "Восстановить").click()
+            with self.database.connection() as conn:
+                self.assertEqual(db.get_tenant(conn, one["id"])["is_archived"], 0)
+            self.assertEqual(window.archive_table.rowCount(), 0)
+            self.assertEqual(window.tenant_table.rowCount(), 2)
+        finally:
+            window.close()
+
+    def test_typography_sliders_persist_independently_and_scale_without_drift(self):
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QApplication
+        from app.ui.forms import SettingsPage
+        from app.ui.common import (apply_appearance, effective_font_weight,
+                                   available_font_weights, read_appearance)
+        private = QSettings(str(Path(self.dir.name) / "ui.ini"), QSettings.Format.IniFormat)
+        private.clear()
+        with mock.patch("app.ui.common.appearance_settings", return_value=private), \
+             mock.patch("app.ui.forms.appearance_settings", return_value=private):
+            page = SettingsPage(self.service)
+            try:
+                self.assertEqual((page.size_slider.minimum(), page.size_slider.maximum()), (80, 200))
+                self.assertEqual(page.size_slider.singleStep(), 5)
+                self.assertEqual((page.weight_slider.minimum(), page.weight_slider.maximum()),
+                                 (300, 800))
+                self.assertEqual(page.weight_slider.singleStep(), 100)
+                self.assertEqual(read_appearance(), (100, 400))
+                base = QApplication.instance().property("_kontakt_base_font")
+                self.assertIsNotNone(base)
+                for size in (80, 100, 150, 175, 200, 150):
+                    page.size_slider.setValue(size)
+                    self.assertEqual(read_appearance()[0], size)
+                    self.assertEqual(page.size_value.text(), f"{size}%")
+                    self.assertAlmostEqual(QApplication.instance().font().pointSizeF(),
+                                           max(7, base.pointSizeF()) * size / 100, delta=1.0)
+                size_at_150 = QApplication.instance().font().pointSizeF()
+                page.weight_slider.setValue(800)
+                self.assertEqual(read_appearance(), (150, 800))
+                self.assertAlmostEqual(QApplication.instance().font().pointSizeF(),
+                                       size_at_150, delta=0.01)
+                self.assertEqual(int(QApplication.instance().font().weight()),
+                                 effective_font_weight(800, available_font_weights(base.family())))
+                self.assertIn("Расчёты электроэнергии", page.preview_title.text())
+                page_again = SettingsPage(self.service)
+                self.assertEqual(page_again.size_slider.value(), 150)
+                self.assertEqual(page_again.weight_slider.value(), 800)
+                page_again._reset_appearance()
+                self.assertEqual(read_appearance(), (100, 400))
+                page_again.close()
+            finally:
+                page.close()
+        apply_appearance()
+
     def test_headless_export_negative_cases_exit_in_separate_processes(self):
         root = Path(__file__).resolve().parent.parent
         environment = os.environ.copy()
