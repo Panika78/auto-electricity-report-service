@@ -258,6 +258,10 @@ class ChipDelegate(QStyledItemDelegate):
         if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(option.rect, QColor("#f5e6dc"))
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        # In the Act/Invoice columns, keep badges short without losing the
+        # complete localized status stored in the model and tooltip.
+        compact = {"Не сформирован": "Нет", "Сформирован": "Готов"}
+        text = compact.get(text, text)
         tone = str(index.data(TONE_ROLE) or "neutral")
         bg, fg = StatusChip.COLORS.get(tone, StatusChip.COLORS["neutral"])
         metrics = option.fontMetrics
