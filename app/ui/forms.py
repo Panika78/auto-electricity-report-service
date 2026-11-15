@@ -10,7 +10,7 @@ from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QScrollArea, QSpinBox, QTabWidget, QTableWidget,
+    QPushButton, QScrollArea, QSlider, QSpinBox, QTabWidget, QTableWidget, QFrame,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 from PySide6.QtGui import QPixmap
@@ -21,7 +21,9 @@ from app.data import queries
 from app.documents import ExportError, export_document, safe_filename
 from app.documents.export import _assert_unique_destinations
 from .common import (CANCELLED, appearance_settings, apply_appearance, guard_database_errors,
-                     import_image, remove_managed_image, parse_number, run_confirmed, show_error, show_number)
+                     import_image, remove_managed_image, parse_number, run_confirmed, show_error, show_number,
+                     read_appearance, available_font_weights, effective_font_weight)
+from .widgets import StatusChip
 
 
 TENANT_FIELDS = [
@@ -686,65 +688,236 @@ class SettingsPage(QWidget):
         self.pending: set[str] = set()
         self._initial_load = True
         self.setObjectName("workspace")
+
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 14, 14, 20)
+        outer.setSpacing(13)
+        eyebrow = QLabel("ПАРАМЕТРЫ ДОКУМЕНТОВ")
+        eyebrow.setObjectName("eyebrow")
+        outer.addWidget(eyebrow)
         heading = QLabel("Настройки")
         heading.setProperty("kontaktHeadingSize", 27)
         outer.addWidget(heading)
+        explanation = QLabel("Единый исполнитель, банковские реквизиты, подпись, печать и оформление.")
+        explanation.setObjectName("subtitle")
+        explanation.setWordWrap(True)
+        outer.addWidget(explanation)
+
         tabs = QTabWidget()
+        tabs.setObjectName("settingsTabs")
         outer.addWidget(tabs, 1)
         scrolling = QScrollArea()
         scrolling.setWidgetResizable(True)
+        scrolling.setFrameShape(QFrame.Shape.NoFrame)
         performer = QWidget()
-        form = QFormLayout(performer)
+        performer_layout = QVBoxLayout(performer)
+        performer_layout.setContentsMargins(8, 15, 8, 15)
+        performer_layout.setSpacing(16)
         self.fields = {}
-        for key, label in SETTINGS_FIELDS:
-            field = _line()
-            field.editingFinished.connect(lambda name=key: self._save_field(name))
-            field.textEdited.connect(lambda _text, name=key: self.pending.add(name))
-            self.fields[key] = field
-            form.addRow(label, field)
-        self.reuse = QCheckBox("Использовать ручные начальные показания прошлого месяца")
-        self.reuse.toggled.connect(self._save_reuse)
-        form.addRow("Автоподстановка", self.reuse)
+
+        def section(title: str, description: str = ""):
+            card = QFrame()
+            card.setObjectName("formCard")
+            content = QVBoxLayout(card)
+            content.setContentsMargins(22, 19, 22, 20)
+            content.setSpacing(12)
+            title_label = QLabel(title)
+            title_label.setProperty("kontaktHeadingSize", 19)
+            content.addWidget(title_label)
+            if description:
+                hint = QLabel(description)
+                hint.setObjectName("mutedLabel")
+                hint.setWordWrap(True)
+                content.addWidget(hint)
+            performer_layout.addWidget(card)
+            return content
+
+        def add_fields(content, choices):
+            grid = QFormLayout()
+            grid.setSpacing(12)
+            grid.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+            for key, label in choices:
+                field = _line()
+                field.setObjectName("settings_" + key)
+                field.setMinimumWidth(130)
+                field.editingFinished.connect(lambda name=key: self._save_field(name))
+                field.textEdited.connect(lambda _text, name=key: self.pending.add(name))
+                self.fields[key] = field
+                grid.addRow(label, field)
+            content.addLayout(grid)
+
+        add_fields(section(
+            "Исполнитель", "Реквизиты автоматически используются во всех новых и повторно "
+            "сформированных документах."), SETTINGS_FIELDS[:5])
+        add_fields(section("Банковские реквизиты"), SETTINGS_FIELDS[5:])
+
+        images_layout = section(
+            "Подпись и печать",
+            "Изображения PNG/JPG необязательны. После загрузки будут доступны в PDF.")
         self.images = {}
-        for key, title in (("signature_path", "Подпись"), ("stamp_path", "Печать")):
-            group = QWidget()
-            controls = QHBoxLayout(group)
-            controls.setContentsMargins(0, 0, 0, 0)
+        self.image_previews = {}
+        for key, title in (("signature_path", "Подпись исполнителя"),
+                           ("stamp_path", "Печать исполнителя")):
+            row = QHBoxLayout()
+            row.setSpacing(15)
+            preview = QLabel("Не загружено")
+            preview.setObjectName("imagePreview")
+            preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            preview.setMinimumSize(120, 85)
+            preview.setMaximumWidth(180)
+            preview.setWordWrap(True)
+            preview.setStyleSheet(
+                "border:1px dashed #cfd6d1;background:#f9faf6;"
+                "border-radius:9px;padding:8px;color:#657276;")
+            self.image_previews[key] = preview
+            row.addWidget(preview)
+            controls = QVBoxLayout()
+            controls.addWidget(QLabel(title))
             info = QLabel("Не загружено")
+            info.setObjectName("mutedLabel")
             info.setWordWrap(True)
-            controls.addWidget(info, 1)
-            select = QPushButton("Загрузить")
+            controls.addWidget(info)
+            buttons = QHBoxLayout()
+            select = QPushButton("Загрузить PNG/JPG")
             select.clicked.connect(lambda _=False, name=key: self._select_image(name))
             remove = QPushButton("Удалить")
             remove.clicked.connect(lambda _=False, name=key: self._remove_image(name))
-            controls.addWidget(select)
-            controls.addWidget(remove)
+            buttons.addWidget(select)
+            buttons.addWidget(remove)
+            controls.addLayout(buttons)
             self.images[key] = (info, remove)
-            form.addRow(title, group)
+            row.addLayout(controls, 1)
+            images_layout.addLayout(row)
+
+        reuse_layout = section(
+            "Начальные показания",
+            "Для редких случаев без достоверной истории предыдущего месяца.")
+        self.reuse = QCheckBox("Переиспользовать вручную заданные начальные показания")
+        self.reuse.toggled.connect(self._save_reuse)
+        reuse_layout.addWidget(self.reuse)
+        performer_layout.addStretch()
         scrolling.setWidget(performer)
         tabs.addTab(scrolling, "Исполнитель")
 
+        appearance_scroll = QScrollArea()
+        appearance_scroll.setWidgetResizable(True)
+        appearance_scroll.setFrameShape(QFrame.Shape.NoFrame)
         appearance = QWidget()
-        appearance_form = QFormLayout(appearance)
-        self.size_picker = QComboBox()
-        self.size_picker.addItem("Меньше", "compact")
-        self.size_picker.addItem("Обычный", "standard")
-        self.size_picker.addItem("Крупнее", "large")
-        self.weight_picker = QComboBox()
-        self.weight_picker.addItem("Лёгкий", "light")
-        self.weight_picker.addItem("Обычный", "normal")
-        self.weight_picker.addItem("Жирный", "bold")
-        appearance_form.addRow("Размер шрифта", self.size_picker)
-        appearance_form.addRow("Насыщенность", self.weight_picker)
-        appearance_form.addRow(QLabel("Оформление применяется сразу и не меняет PDF и статусы документов."))
-        self.size_picker.currentIndexChanged.connect(
-            lambda _i: self._change_appearance("font_size", self.size_picker.currentData()))
-        self.weight_picker.currentIndexChanged.connect(
-            lambda _i: self._change_appearance("font_weight", self.weight_picker.currentData()))
-        tabs.addTab(appearance, "Оформление")
+        appearance_body = QVBoxLayout(appearance)
+        appearance_body.setContentsMargins(8, 15, 8, 15)
+        appearance_body.setSpacing(17)
+        controls_card = QFrame()
+        controls_card.setObjectName("formCard")
+        sliders = QVBoxLayout(controls_card)
+        sliders.setContentsMargins(22, 19, 22, 20)
+        sliders.setSpacing(17)
+        heading = QLabel("Текст интерфейса")
+        heading.setProperty("kontaktHeadingSize", 20)
+        sliders.addWidget(heading)
+        intro = QLabel(
+            "Размер и насыщенность настраиваются независимо. "
+            "Изменения видны сразу и сохраняются на этом компьютере.")
+        intro.setWordWrap(True)
+        intro.setObjectName("mutedLabel")
+        sliders.addWidget(intro)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("Размер текста"), 1)
+        self.size_value = QLabel("100%")
+        self.size_value.setObjectName("fontValue")
+        size_row.addWidget(self.size_value)
+        size_reset = QPushButton("Сбросить размер")
+        size_reset.clicked.connect(lambda: self.size_slider.setValue(100))
+        size_row.addWidget(size_reset)
+        sliders.addLayout(size_row)
+        self.size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.size_slider.setObjectName("fontSizeSlider")
+        self.size_slider.setRange(80, 200)
+        self.size_slider.setSingleStep(5)
+        self.size_slider.setPageStep(10)
+        self.size_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.size_slider.setTickInterval(20)
+        self.size_slider.setAccessibleName("Масштаб интерфейсного текста, проценты")
+        self.size_slider.valueChanged.connect(
+            lambda value: self._change_appearance("font_size_percent", value))
+        sliders.addWidget(self.size_slider)
+        scale_marks = QHBoxLayout()
+        for name in ("80%", "100% · стандарт", "200%"):
+            label = QLabel(name)
+            label.setObjectName("mutedLabel")
+            scale_marks.addWidget(label)
+        sliders.addLayout(scale_marks)
+
+        weight_row = QHBoxLayout()
+        weight_row.addWidget(QLabel("Насыщенность текста"), 1)
+        self.weight_value = QLabel("400")
+        self.weight_value.setObjectName("fontValue")
+        weight_row.addWidget(self.weight_value)
+        weight_reset = QPushButton("Сбросить насыщенность")
+        weight_reset.clicked.connect(lambda: self.weight_slider.setValue(400))
+        weight_row.addWidget(weight_reset)
+        sliders.addLayout(weight_row)
+        self.weight_slider = QSlider(Qt.Orientation.Horizontal)
+        self.weight_slider.setObjectName("fontWeightSlider")
+        self.weight_slider.setRange(300, 800)
+        self.weight_slider.setSingleStep(100)
+        self.weight_slider.setPageStep(100)
+        self.weight_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.weight_slider.setTickInterval(100)
+        self.weight_slider.setAccessibleName("Насыщенность интерфейсного текста, CSS font-weight")
+        self.weight_slider.valueChanged.connect(
+            lambda value: self._change_appearance("font_weight_value", value))
+        sliders.addWidget(self.weight_slider)
+        weight_marks = QHBoxLayout()
+        weight_marks.addWidget(QLabel("300 · Лёгкий"))
+        weight_marks.addStretch()
+        weight_marks.addWidget(QLabel("800 · Очень жирный"))
+        sliders.addLayout(weight_marks)
+        self.weight_effective = QLabel()
+        self.weight_effective.setObjectName("mutedLabel")
+        self.weight_effective.setWordWrap(True)
+        sliders.addWidget(self.weight_effective)
+        reset_all = QPushButton("Вернуть стандартное оформление")
+        reset_all.clicked.connect(self._reset_appearance)
+        sliders.addWidget(reset_all)
+        appearance_body.addWidget(controls_card)
+
+        preview = QFrame()
+        preview.setObjectName("previewCard")
+        preview_body = QVBoxLayout(preview)
+        preview_body.setContentsMargins(23, 20, 23, 22)
+        preview_body.setSpacing(9)
+        kicker = QLabel("ПРЕДПРОСМОТР · ИНТЕРАКТИВНО")
+        kicker.setObjectName("eyebrow")
+        preview_body.addWidget(kicker)
+        self.preview_title = QLabel("Расчёты электроэнергии")
+        self.preview_title.setProperty("kontaktHeadingSize", 20)
+        self.preview_title.setWordWrap(True)
+        preview_body.addWidget(self.preview_title)
+        self.preview_text = QLabel(
+            "Показания, тарифы, акты и счета отображаются в выбранном размере и начертании.")
+        self.preview_text.setWordWrap(True)
+        preview_body.addWidget(self.preview_text)
+        self.preview_number = QLabel("37 638,00 ₽ · 3 400,000 кВт·ч")
+        self.preview_number.setWordWrap(True)
+        preview_body.addWidget(self.preview_number)
+        self.preview_status = StatusChip("Готов к формированию", "ok")
+        preview_body.addWidget(self.preview_status)
+        appearance_body.addWidget(preview)
+        note = QLabel(
+            "Это только оформление интерфейса. Расчёты, статусы и PDF не изменяются. "
+            "На слабых системных шрифтах некоторые соседние значения насыщенности "
+            "могут использовать одно и то же доступное начертание.")
+        note.setWordWrap(True)
+        note.setObjectName("mutedLabel")
+        appearance_body.addWidget(note)
+        appearance_body.addStretch()
+        appearance_scroll.setWidget(appearance)
+        tabs.addTab(appearance_scroll, "Оформление")
+
         self.note = QLabel("Все изменения реквизитов сохраняются после выхода из поля.")
-        self.note.setStyleSheet("color:#657276;")
+        self.note.setObjectName("mutedLabel")
+        self.note.setWordWrap(True)
         outer.addWidget(self.note)
         self.reload()
         self._initial_load = False
