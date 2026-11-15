@@ -106,5 +106,27 @@ class GuiSmokeTests(unittest.TestCase):
         self.default_database_path.assert_not_called()
 
 
+    def test_queued_column_fit_is_destroyed_with_window(self):
+        # A queued QTimer callback must not outlive its QTableWidget on Windows.
+        from shiboken6 import isValid
+        from PySide6.QtCore import QCoreApplication, QEvent
+        from PySide6.QtWidgets import QApplication
+        from app.data.database import Database
+        from app.ui.main_window import MainWindow
+
+        database = Database(Path(self.temporary.name) / "fit.db")
+        database.initialize()
+        window = MainWindow(database)
+        window.show()
+        window._schedule_calculation_fit()
+        queued_timer = window._immediate_fit_timer
+        self.assertTrue(queued_timer.isActive())
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        QApplication.processEvents()
+        self.assertFalse(isValid(queued_timer))
+        self.default_database_path.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
