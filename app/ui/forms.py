@@ -1562,7 +1562,7 @@ class BulkExportDialog(QDialog):
                 details = "; ".join(skipped.get("errors", ()))
                 if details:
                     reason += f" ({details})"
-                lines.append(f'• Арендатор #{skipped["tenant_id"]}: {reason}')
+                lines.append(f'• {skipped["tenant_name"]}: {reason}')
         if result.cleanup_errors or result.leftover_staged:
             lines.append("\nВНИМАНИЕ: временные файлы могли остаться на диске.")
             if result.leftover_staged:
