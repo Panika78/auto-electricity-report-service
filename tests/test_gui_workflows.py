@@ -962,6 +962,104 @@ class NativeWorkflowTests(unittest.TestCase):
                 page.close()
         apply_appearance()
 
+    def test_navigation_only_three_entries_but_archive_stays_reachable(self):
+        from PySide6.QtWidgets import QApplication, QPushButton, QLabel
+        from app.ui.main_window import MainWindow
+        window = MainWindow(self.database)
+        try:
+            window.show()
+            QApplication.processEvents()
+            self.assertEqual(set(window.nav_buttons), {"calculations", "tenants", "settings"})
+            self.assertEqual(set(button.text() for button in window.nav_buttons.values()),
+                             {"Расчёты", "Арендаторы", "Настройки"})
+            self.assertFalse(any("Локальные данные" in label.text()
+                                 for label in window.findChildren(QLabel)))
+            self.assertFalse(any("Как проходит работа" in label.text()
+                                 for label in window.findChildren(QLabel)))
+            self.assertFalse(any(child.objectName() == "helpStrip"
+                                 for child in window.findChildren(
+                                     __import__("PySide6.QtWidgets",
+                                                fromlist=["QFrame"]).QFrame)))
+            self.assertTrue(all(not b.icon().isNull()
+                                for b in window.nav_buttons.values()))
+            window.navigate("tenants")
+            self.assertIn("Открыть архив", window.open_archive_button.text())
+            self.assertFalse(window.open_archive_button.icon().isNull())
+            window.open_archive_button.click()
+            self.assertEqual(window.pages.currentIndex(), 2)
+            self.assertTrue(window.nav_buttons["tenants"].isChecked())
+            self.assertNotIn("archive", window.nav_buttons)
+            self.assertTrue(any(b.text() == "К активным арендаторам"
+                                for b in window.archive_page.findChildren(QPushButton)))
+            window.navigate("calculations")
+            self.assertFalse(window.bulk_action.icon().isNull())
+            self.assertFalse(window.fit_columns_button.icon().isNull())
+            self.assertFalse(window.bulk_action.isEnabled())
+        finally:
+            window.close()
+
+    def test_calculation_table_fits_window_until_manual_resize_then_reset(self):
+        from PySide6.QtWidgets import QApplication, QHeaderView
+        from PySide6.QtCore import QDate
+        from app.ui.main_window import MainWindow
+        tenant = self._tenant()
+        self.service.set_tariff(2026, 10, "7")
+        self.service.create_calculation(
+            tenant["id"], 2026, 10, start_reading="1", end_reading="9999999999.999")
+        window = MainWindow(self.database)
+        try:
+            window.resize(1880, 940)
+            window.show()
+            window.period_picker.setDate(QDate(2026, 10, 1))
+            QApplication.processEvents()
+            table = window.calc_table
+            header = table.horizontalHeader()
+            self.assertTrue(window._calc_columns_auto)
+            self.assertTrue(all(
+                header.sectionResizeMode(column) == QHeaderView.ResizeMode.Interactive
+                for column in range(table.columnCount())))
+            self.assertEqual(table.rowCount(), 1)
+            viewport = table.viewport().width()
+            total = sum(table.columnWidth(i) for i in range(table.columnCount()))
+            self.assertLessEqual(abs(viewport - total), 4)
+            self.assertGreaterEqual(table.columnWidth(2), table.fontMetrics().horizontalAdvance(
+                table.item(0, 2).text()) + 16)
+            self.assertGreaterEqual(table.columnWidth(3), table.fontMetrics().horizontalAdvance(
+                table.item(0, 3).text()) + 16)
+            manual = table.columnWidth(0) + 67
+            table.setColumnWidth(0, manual)  # same signal a user drag sends
+            self.assertFalse(window._calc_columns_auto)
+            self.assertEqual(table.columnWidth(0), manual)
+            window.resize(1580, 820)
+            QApplication.processEvents()
+            window.refresh_calculations()
+            QApplication.processEvents()
+            self.assertEqual(table.columnWidth(0), manual)
+            self.assertFalse(window._calc_columns_auto)
+            window.fit_columns_button.click()
+            QApplication.processEvents()
+            self.assertTrue(window._calc_columns_auto)
+            self.assertNotEqual(table.columnWidth(0), manual)
+            self.assertLessEqual(abs(
+                table.viewport().width() -
+                sum(table.columnWidth(i) for i in range(table.columnCount()))), 4)
+            window.resize(2000, 940)
+            QApplication.processEvents()
+            self.assertTrue(window._calc_columns_auto)
+            self.assertLessEqual(abs(
+                table.viewport().width() -
+                sum(table.columnWidth(i) for i in range(table.columnCount()))), 4)
+            # Auto-fit leaves unreadably large numbers intact rather than
+            # forcing every column to squeeze into a narrow viewport.
+            window.resize(790, 560)
+            QApplication.processEvents()
+            self.assertGreaterEqual(table.columnWidth(3),
+                                    table.fontMetrics().horizontalAdvance(
+                                        table.item(0, 3).text()) + 16)
+            self.assertTrue(table.horizontalScrollBar().maximum() > 0)
+        finally:
+            window.close()
+
     def test_200_percent_layout_keeps_pages_cards_and_dialog_actions_accessible(self):
         from PySide6.QtCore import QDate, QSettings
         from PySide6.QtWidgets import QApplication, QScrollArea, QPushButton
