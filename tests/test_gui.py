@@ -18,6 +18,23 @@ class GuiSmokeTests(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
+    @classmethod
+    def tearDownClass(cls):
+        """Release hidden Qt top-levels before QApplication interpreter shutdown.
+
+        Qt's offscreen platform can abort in C++ virtual destruction when
+        Python wrappers for long-lived dialogs are finalized after the app.
+        """
+        import gc
+        from PySide6.QtCore import QCoreApplication, QEvent
+        from PySide6.QtWidgets import QApplication
+        for widget in list(QApplication.topLevelWidgets()):
+            widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        QApplication.processEvents()
+        gc.collect()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
     def setUp(self):
         # Fail hard if a smoke test ever falls back to the real profile database.
         from app.data import database as db
