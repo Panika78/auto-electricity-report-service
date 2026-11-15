@@ -488,26 +488,46 @@ class CalculationService:
                                  "tenant": tenant["updated_at"], "performer": settings["updated_at"],
                                  "document": document["updated_at"] if document else None}}
 
-    def mark_document_generated(self, document_id: int, *, expected_revision: Mapping[str, str | None]) -> dict[str, Any]:
-        """Вызывать ТОЛЬКО после успешного сохранения PDF; защищает от гонки правок."""
+    def mark_documents_generated(
+            self, revisions: Mapping[int, Mapping[str, str | None]], *,
+            require_active: bool = False) -> dict[int, dict[str, Any]]:
+        """Confirm an entire published batch in ONE SQLite transaction.
+
+        Verify all snapshots before updating any status: a stale document or
+        commit failure leaves every status untouched. File publication must
+        precede this call; the filesystem is not part of this transaction.
+        """
+        if not revisions:
+            return {}
         with self.database.transaction() as conn:
-            document = db.get_document(conn, document_id)
-            if document is None:
-                raise LookupError(f"Документ {document_id} не найден.")
-            calc = self._require_calculation(conn, document["calculation_id"])
-            tariff = queries.month_tariff(conn, calc["year"], calc["month"])
-            tenant = self._require_tenant(conn, calc["tenant_id"])
-            settings = db.get_settings(conn)
-            current_revision = {"calculation": calc["updated_at"],
-                                "calculation_values": self._calculation_fingerprint(calc),
-                                "tariff": tariff["updated_at"] if tariff else None,
-                                "tenant": tenant["updated_at"], "performer": settings["updated_at"],
-                                "document": document["updated_at"]}
-            if current_revision != dict(expected_revision) or not validate_calculation(
-                    calc, tariff["rate"] if tariff else None).ready:
-                raise ValueError("Данные изменились во время генерации; документ не отмечен актуальным.")
-            db.update_document(conn, document_id, is_current=True, last_generated_at=db._timestamp())
-            return db.get_document(conn, document_id)
+            for document_id, expected in revisions.items():
+                document = db.get_document(conn, document_id)
+                if document is None:
+                    raise LookupError(f"Документ {document_id} не найден.")
+                calc = self._require_calculation(conn, document["calculation_id"])
+                tariff = queries.month_tariff(conn, calc["year"], calc["month"])
+                tenant = self._require_tenant(conn, calc["tenant_id"])
+                settings = db.get_settings(conn)
+                current = {"calculation": calc["updated_at"],
+                           "calculation_values": self._calculation_fingerprint(calc),
+                           "tariff": tariff["updated_at"] if tariff else None,
+                           "tenant": tenant["updated_at"], "performer": settings["updated_at"],
+                           "document": document["updated_at"]}
+                if (current != dict(expected)
+                        or not validate_calculation(calc, tariff["rate"] if tariff else None).ready
+                        or (require_active and tenant["is_archived"])):
+                    raise ValueError(
+                        "Данные изменились во время генерации; статусы пакета не обновлены.")
+            for document_id in revisions:
+                db.update_document(conn, document_id, is_current=True,
+                                   last_generated_at=db._timestamp())
+            return {document_id: db.get_document(conn, document_id)
+                    for document_id in revisions}
+
+    def mark_document_generated(self, document_id: int, *,
+                                expected_revision: Mapping[str, str | None]) -> dict[str, Any]:
+        """Confirm one published PDF using the same revision protocol."""
+        return self.mark_documents_generated({document_id: expected_revision})[document_id]
 
     def bulk_candidates(self, year: int, month: int) -> dict[str, Any]:
         """Последний готовый для каждого активного арендатора; нули пропускаются."""
