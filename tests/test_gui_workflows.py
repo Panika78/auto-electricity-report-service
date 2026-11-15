@@ -24,6 +24,23 @@ class NativeWorkflowTests(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
+    @classmethod
+    def tearDownClass(cls):
+        """Release hidden Qt top-levels before QApplication interpreter shutdown.
+
+        Qt's offscreen platform can abort in C++ virtual destruction when
+        Python wrappers for long-lived dialogs are finalized after the app.
+        """
+        import gc
+        from PySide6.QtCore import QCoreApplication, QEvent
+        from PySide6.QtWidgets import QApplication
+        for widget in list(QApplication.topLevelWidgets()):
+            widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        QApplication.processEvents()
+        gc.collect()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
     def setUp(self):
         from app.data.database import Database
         from app.core.service import CalculationService
