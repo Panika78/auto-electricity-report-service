@@ -37,12 +37,17 @@ def russian_date(iso: str | None) -> str:
     return str(iso)
 
 
-def display_number(value, places: int = 3, suffix: str = "") -> str:
+def display_number(value, places: int = 3, suffix: str = "", *,
+                   trim: bool = False) -> str:
     if value is None or value == "":
         return "—"
     try:
         number = Decimal(str(value))
         rendered = f"{number:,.{places}f}".replace(",", "\u202f").replace(".", ",")
+        if trim and places and "," in rendered:
+            # The HTML prototype uses significant decimals for readings and
+            # tariffs: 100,000 → 100; 120,125 stays 120,125. Preserve Decimal.
+            rendered = rendered.rstrip("0").rstrip(",")
         return rendered + (f" {suffix}" if suffix else "")
     except (InvalidOperation, ValueError):
         return str(value)
@@ -305,7 +310,8 @@ class TenantCard(QFrame):
         for title, value in (
             ("ИНН", tenant.get("inn") or "Не указан"),
             ("Договор", tenant.get("contract_number") or "Не указан"),
-            ("Начальные показания", display_number(tenant.get("initial_reading"), 3, "кВт·ч")),
+            ("Начальные показания", display_number(
+                tenant.get("initial_reading"), 3, "кВт·ч", trim=True)),
         ):
             block = QHBoxLayout()
             key = QLabel(title)
