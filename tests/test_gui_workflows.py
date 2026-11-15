@@ -191,17 +191,23 @@ class NativeWorkflowTests(unittest.TestCase):
                                last_generated_at="2026-11-01T00:00:00")
         page = SettingsPage(self.service)
         settings = appearance_settings()
-        previous_size = settings.value("font_size", "standard")
-        previous_weight = settings.value("font_weight", "normal")
+        previous_size = settings.value("font_size_percent")
+        previous_weight = settings.value("font_weight_value")
         try:
-            page.size_picker.setCurrentIndex(page.size_picker.findData("large"))
-            page.weight_picker.setCurrentIndex(page.weight_picker.findData("bold"))
-            self.assertEqual(settings.value("font_size"), "large")
-            self.assertEqual(settings.value("font_weight"), "bold")
+            page.size_slider.setValue(150)
+            page.weight_slider.setValue(700)
+            self.assertEqual(int(settings.value("font_size_percent")), 150)
+            self.assertEqual(int(settings.value("font_weight_value")), 700)
             self.assertEqual(self.service.document_status(calc["id"], "act"), "current")
         finally:
-            settings.setValue("font_size", previous_size)
-            settings.setValue("font_weight", previous_weight)
+            if previous_size is None:
+                settings.remove("font_size_percent")
+            else:
+                settings.setValue("font_size_percent", previous_size)
+            if previous_weight is None:
+                settings.remove("font_weight_value")
+            else:
+                settings.setValue("font_weight_value", previous_weight)
             settings.sync()
             from app.ui.common import apply_appearance
             apply_appearance()
