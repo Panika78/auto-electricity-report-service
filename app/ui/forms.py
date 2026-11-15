@@ -23,7 +23,7 @@ from app.documents.export import _assert_unique_destinations
 from .common import (CANCELLED, appearance_settings, apply_appearance, guard_database_errors,
                      import_image, remove_managed_image, parse_number, run_confirmed, show_error, show_number,
                      read_appearance, available_font_weights, effective_font_weight)
-from .widgets import StatusChip
+from .widgets import StatusChip, russian_date
 
 
 TENANT_FIELDS = [
@@ -123,6 +123,7 @@ class TenantDialog(QDialog):
         self.history = QTableWidget(0, 6)
         self.history.setHorizontalHeaderLabels(
             ["ID", "Месяц", "Даты", "Расход", "Сумма", "Готовность"])
+        self.history.setColumnHidden(0, True)  # internal row identity, not user-facing data
         self.history.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.history.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.history.horizontalHeader().setStretchLastSection(True)
@@ -289,7 +290,7 @@ class TenantDialog(QDialog):
             row = self.history.rowCount()
             self.history.insertRow(row)
             values = [calc["id"], f"{calc['month']:02d}.{calc['year']}",
-                      f"{calc['period_start']} — {calc['period_end']}",
+                      f"{russian_date(calc['period_start'])} — {russian_date(calc['period_end'])}",
                       show_number(calc["consumption"]), show_number(calc["total_amount"]),
                       "Готов" if calc["is_ready"] else "Черновик"]
             for column, value in enumerate(values):
