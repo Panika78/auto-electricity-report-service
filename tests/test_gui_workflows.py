@@ -1031,6 +1031,7 @@ class NativeWorkflowTests(unittest.TestCase):
 
     def test_typical_calculation_table_starts_fitted_at_1360_px(self):
         from PySide6.QtWidgets import QApplication
+        from PySide6.QtTest import QTest
         from PySide6.QtCore import QDate
         from app.ui.main_window import MainWindow
         tenant = self._tenant(contract_number="Д-2026/1")
@@ -1043,7 +1044,8 @@ class NativeWorkflowTests(unittest.TestCase):
             window.show()
             window.period_picker.setDate(QDate(2026, 10, 1))
             QApplication.processEvents()
-            QApplication.processEvents()  # let nested scroll-area resize propagate
+            QApplication.processEvents()
+            QTest.qWait(85)  # Qt event loop settles the native scroll-area width
             table = window.calc_table
             self.assertTrue(window._calc_columns_auto)
             self.assertGreater(table.viewport().width(), 700)
