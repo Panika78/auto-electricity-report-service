@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import calendar
 import sqlite3
+from decimal import Decimal
 from functools import wraps
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, Qt, QLocale
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDateEdit, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView,
+    QScrollArea, QGridLayout, QSizePolicy, QTabWidget,
 )
 
 from app.core.service import CalculationService
@@ -19,31 +21,52 @@ from app.data import database as db
 from app.data import queries
 from app.ui.common import CANCELLED, apply_appearance, parse_number, run_confirmed, show_error, show_number
 from app.ui.forms import CalculationDialog, ExportDialog, SettingsPage, TenantDialog
+from app.ui.widgets import (CompanyDelegate, ChipDelegate, META_ROLE, TONE_ROLE,
+                            MetricCard, TenantCard, display_number,
+                            month_label, russian_date)
 
 
 THEME = """
 QMainWindow, QWidget#workspace {background: #f6f4ef; color: #1b2b30;}
 QFrame#sidebar {background: #192a2f;}
-QFrame#panel {background: #fffefa; border: 1px solid #dfe2df; border-radius: 14px;}
+QFrame#panel, QFrame#metricCard, QFrame#tenantCard, QFrame#formCard,
+QFrame#previewCard {background: #fffefa; border: 1px solid #dfe2df; border-radius: 14px;}
+QFrame#metricCard {border: 1px solid #e6e7e2;}
+QFrame#tenantCard:hover {border: 1px solid #d3a28c;}
+QFrame#helpStrip {background: #f0eee7; border-left: 3px solid #c55e3c;
+                  border-radius: 8px; color: #3b5051;}
 QFrame#sidebar QPushButton {background: transparent; border: none; border-radius: 9px;
   color: #b7c7c7; text-align: left; padding: 12px;}
 QFrame#sidebar QPushButton:hover {background: #304248; color: #ffffff;}
-QFrame#sidebar QPushButton:checked {background: #344a4d; color: white; border-left: 3px solid #ec946d;}
+QFrame#sidebar QPushButton:checked {background: #344a4d; color: white;
+  border-left: 3px solid #ec946d;}
+QLabel#eyebrow {color: #ae634d; font-weight: 700;}
+QLabel#mutedLabel, QLabel#subtitle, QLabel#panelDescription {color: #657276;}
+QLabel#metricTag {color: #a1543b; background: #f9eee8; padding: 4px 7px;
+  border-radius: 7px; font-weight: 600;}
 QPushButton {background: #fffefa; color: #1b2b30; border: 1px solid #d4dcd7;
   border-radius: 9px; padding: 8px 13px; min-height: 20px;}
 QPushButton:hover:enabled {background: #f0f1ec; border-color: #abbbb1;}
 QPushButton[primary="true"] {background: #c55e3c; border-color: #c55e3c; color: white;}
 QPushButton[primary="true"]:hover:enabled {background: #a94e31;}
+QPushButton[dark="true"] {background: #263a3f; color: white; border-color: #263a3f;}
 QPushButton:disabled {color: #889397; background: #eef0ed;}
 QPushButton:focus, QLineEdit:focus, QComboBox:focus, QDateEdit:focus,
-QTableWidget:focus {border: 2px solid #c55e3c;}
+QTableWidget:focus, QSlider:focus {border: 2px solid #c55e3c;}
 QLineEdit, QComboBox, QDateEdit {background: #fffefa; border: 1px solid #d8dfda;
   border-radius: 8px; padding: 7px; min-height: 20px;}
-QTableWidget {background: #fffefa; gridline-color: #eceeeb;
+QTableWidget {background: #fffefa; border: 0; gridline-color: #eceeeb;
   selection-background-color: #f5e6dc; selection-color: #1b2b30;
   alternate-background-color: #fafaf7;}
-QHeaderView::section {background: #f1f3ef; color: #576a6d;
+QHeaderView::section {background: #f7f8f5; color: #576a6d;
   border: none; border-bottom: 1px solid #dfe2df; padding: 9px; font-weight: 600;}
+QScrollArea {border: none; background: transparent;}
+QSlider::groove:horizontal {height: 6px; background: #e5e2da; border-radius: 3px;}
+QSlider::sub-page:horizontal {background: #c55e3c; border-radius: 3px;}
+QSlider::handle:horizontal {width: 17px; height: 17px; margin: -6px 0;
+  border: 2px solid #fffefa; border-radius: 9px; background: #c55e3c;}
+QSlider::handle:horizontal:hover {background: #ab4f32;}
+QSlider::handle:horizontal:focus {border-color: #263a3f;}
 """
 
 
@@ -70,12 +93,13 @@ def table(headers: list[str]) -> QTableWidget:
     widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
     widget.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     widget.setAlternatingRowColors(True)
-    widget.setWordWrap(False)
+    widget.setWordWrap(True)
     widget.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     widget.verticalHeader().setVisible(False)
-    widget.horizontalHeader().setStretchLastSection(True)
-    widget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-    widget.setMinimumHeight(260)
+    widget.horizontalHeader().setStretchLastSection(False)
+    widget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    widget.horizontalHeader().setMinimumSectionSize(82)
+    widget.setMinimumHeight(240)
     return widget
 
 
@@ -104,8 +128,9 @@ def database_error_dialog(operation):
                 self.calc_table.setRowCount(0)
                 self.summary.setText("Расчёты не загружены — ошибка доступа к базе данных.")
             elif operation.__name__ == "refresh_tenants":
-                (self.archive_table if kwargs.get("archived", args[0] if args else False)
-                 else self.tenant_table).setRowCount(0)
+                archived = kwargs.get("archived", args[0] if args else False)
+                (self.archive_table if archived else self.tenant_table).setRowCount(0)
+                self._clear_tenant_cards(archived)
             self.statusBar().showMessage("Ошибка доступа к базе данных — данные не обновлены.")
             show_error(self, error, "Ошибка доступа к базе данных")
             return None
