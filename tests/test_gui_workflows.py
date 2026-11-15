@@ -1048,6 +1048,11 @@ class NativeWorkflowTests(unittest.TestCase):
             QTest.qWait(85)  # Qt event loop settles the native scroll-area width
             table = window.calc_table
             self.assertTrue(window._calc_columns_auto)
+            self.assertEqual(table.item(0, 2).text(), "100")
+            self.assertEqual(table.item(0, 3).text(), "120")
+            self.assertEqual(table.item(0, 4).text(), "20")
+            self.assertEqual(table.item(0, 5).text(), "5")
+            self.assertEqual(table.item(0, 6).text(), "100,00")
             self.assertGreater(table.viewport().width(), 700)
             widths = [table.columnWidth(i) for i in range(table.columnCount())]
             app_font = QApplication.instance().property("_kontakt_base_font")
