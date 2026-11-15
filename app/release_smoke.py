@@ -14,23 +14,14 @@ from pathlib import Path
 from app.core.service import CalculationService
 from app.data import database as db
 from app.documents import export_bulk_zip, export_document
+from app.qa_profile import validate_qa_profile
 
 
 def _probe() -> str:
     # The caller MUST redirect the default database location to a dedicated
     # absolute test profile. Never open or overwrite a normal user profile.
-    selected = os.environ.get("KONTAKT_SMOKE_ROOT")
-    if not selected:
-        raise RuntimeError("Не задан изолированный профиль тестирования.")
-    root = Path(selected).expanduser().resolve()
-    if not root.is_absolute() or not root.is_dir():
-        raise RuntimeError("Каталог тестового профиля не существует.")
+    root = validate_qa_profile()
     expected = root / "ElectricityReports" / "app.db"
-    actual = db.get_database_path()
-    if actual != expected:
-        raise RuntimeError(
-            "Путь базы данных не совпадает с изолированным профилем; проверка прервана."
-        )
 
     from PySide6.QtCore import QSettings
     from PySide6.QtGui import QImage
