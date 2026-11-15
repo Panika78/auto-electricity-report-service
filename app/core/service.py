@@ -289,6 +289,42 @@ class CalculationService:
                         min(current["period_start"], values["period_start"]))
             return db.get_calculation(conn, calculation_id)
 
+    def reset_manual_override(self, calculation_id: int, field: str) -> dict[str, Any]:
+        """Return a manually edited consumption/amount to formula-based values.
+
+        A checked UI override is an existing domain concept; unchecking it must
+        persistently clear the flag, not merely disable the input. Reuse the
+        same Decimal calculation, validation, transaction and document
+        invalidation rules as update_calculation().
+        """
+        if field not in ("consumption", "total_amount"):
+            raise ValueError("Сброс ручного ввода доступен только для расхода и суммы.")
+        flag = "manual_consumption" if field == "consumption" else "manual_amount"
+        with self.database.transaction() as conn:
+            current = self._require_calculation(conn, calculation_id)
+            if not current[flag]:
+                return current
+            values = {**current, flag: False}
+            if field == "consumption":
+                # Recalculating consumption also resets any manual amount.
+                values["manual_amount"] = False
+            tariff = queries.month_tariff(conn, values["year"], values["month"])
+            rate = tariff["rate"] if tariff else None
+            values["consumption"], values["total_amount"] = recalculate(
+                values["start_reading"], values["end_reading"], rate,
+                consumption=values["consumption"], amount=values["total_amount"],
+                manual_consumption=bool(values["manual_consumption"]),
+                manual_amount=bool(values["manual_amount"]))
+            values["is_ready"] = validate_calculation(values, rate).ready
+            changed = {
+                key: value for key, value in values.items()
+                if key in db._CALCULATION_COLUMNS and value != current[key]
+            }
+            if changed:
+                db.update_calculation(conn, calculation_id, **changed)
+                queries.invalidate_documents(conn, (calculation_id,))
+            return db.get_calculation(conn, calculation_id)
+
     def set_tariff(self, year: int, month: int, rate: Decimal | str | int, *,
                    confirm_recalculation: bool = False) -> dict[str, Any]:
         self._month(year, month)
