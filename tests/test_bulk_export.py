@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 from pypdf import PdfReader
@@ -439,16 +439,53 @@ class BulkZipTests(unittest.TestCase):
         self.assertEqual(self.docs(cid), {})
 
     def test_named_windows_device_and_casefold_directory_avoidance(self):
-        ids = [self.calc(self.tenant(name)) for name in ("CON", "con", "..", "A\\B")]
+        # Windows reserves these names even with an extension followed by
+        # _T{id}, and recognises superscript digits as COM/LPT port numbers.
+        names = (
+            "CON", "con", "..", "A\\B",
+            "COM¹.txt", "COM².txt", "COM³.txt",
+            "LPT¹.txt", "LPT².txt", "LPT³.txt",
+            "CONIN$.txt", "CONOUT$.txt",
+        )
+        ids = [self.calc(self.tenant(name)) for name in names]
         result = export_bulk_zip(self.service, 2026, 10, self.root / "safe.zip",
                                  kinds=("act",))
         entries = self.entries(result)
-        self.assertEqual(len(entries), 4)
-        self.assertEqual(len({n.casefold() for n in entries}), 4)
+        self.assertTrue(result.statuses_confirmed)
+        self.assertEqual(len(entries), len(names))
+        self.assertEqual(len({n.casefold() for n in entries}), len(names))
         for entry in entries:
             folder, filename = entry.split("/")
-            self.assertNotIn(folder.upper(), {"CON", "PRN", "AUX", "NUL"})
+            self.assertFalse(PureWindowsPath(folder).is_reserved(), folder)
+            self.assertFalse(PureWindowsPath(filename).is_reserved(), filename)
+            self.assertFalse(folder.endswith((" ", ".")), folder)
+            self.assertFalse(filename.endswith((" ", ".")), filename)
             self.assertTrue(filename.endswith(".pdf"))
+        for doc in result.successful:
+            if doc.tenant_name.startswith(("COM¹", "COM²", "COM³",
+                                           "LPT¹", "LPT²", "LPT³",
+                                           "CONIN$", "CONOUT$")):
+                self.assertTrue(doc.entry_name.split("/")[0].startswith("_"),
+                                doc.entry_name)
+
+    def test_superscript_windows_archive_names_rejected_before_reservations(self):
+        cid = self.calc(self.tenant("Проверка пути ZIP"))
+        for name in ("COM¹.zip", "COM².zip", "COM³.zip",
+                     "LPT¹.zip", "LPT².zip", "LPT³.zip",
+                     "CONIN$.zip", "CONOUT$.zip", "COM¹.txt.zip"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                export_bulk_zip(self.service, 2026, 10, self.root / name)
+            self.assertFalse((self.root / name).exists())
+        self.assertEqual(self.docs(cid), {})
+
+    def test_individual_pdf_superscript_reserved_name_rejected_before_reservation(self):
+        from app.documents.export import export_document
+        cid = self.calc(self.tenant("Проверка пути PDF"))
+        for name in ("COM¹.pdf", "COM².pdf", "LPT³.pdf", "CONIN$.pdf"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                export_document(self.service, cid, "act", self.root / name)
+            self.assertFalse((self.root / name).exists())
+        self.assertEqual(self.docs(cid), {})
 
 
 HAS_QT = importlib.util.find_spec("PySide6") is not None
