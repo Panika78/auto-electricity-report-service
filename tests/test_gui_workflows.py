@@ -1175,7 +1175,10 @@ class NativeWorkflowTests(unittest.TestCase):
             with self.database.connection() as conn:
                 self.assertEqual(db.list_calculations(conn), [])
         finally:
-            dialog.close()
+            from PySide6.QtWidgets import QMessageBox
+            with mock.patch.object(QMessageBox, "question",
+                                   return_value=QMessageBox.StandardButton.Yes):
+                dialog.close()
 
     def test_manual_amount_checkbox_saves_and_unchecking_resets_formula(self):
         from PySide6.QtWidgets import QMessageBox
