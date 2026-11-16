@@ -15,7 +15,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
   pull-requests: write
 
 jobs:
@@ -74,6 +73,7 @@ jobs:
           python scripts/validate_windows_bundle.py --dist dist/kontakt --zip $zip
           if ($LASTEXITCODE -ne 0) { throw "Release bundle allowlist verification failed." }
       - uses: actions/upload-artifact@v4
+        id: release_artifact
         with:
           name: kontakt-windows-x64-rc
           path: |
@@ -85,6 +85,8 @@ jobs:
       - name: Publish checked artifact reference to same-repo PR
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
+        env:
+          KONTAKT_ARTIFACT_ID: ${{ steps.release_artifact.outputs.artifact-id }}
         with:
           script: |
             const fs = require('fs');
@@ -94,12 +96,12 @@ jobs:
             if (manifest.pr_head_commit !== head || manifest.build_checkout_commit !== context.sha) {
               throw new Error('Manifest does not match this PR HEAD and actual workflow checkout.');
             }
-            const { data: listing } = await github.rest.actions.listWorkflowRunArtifacts({
-              owner, repo, run_id: context.runId, per_page: 100
-            });
-            const artifacts = listing.artifacts.filter(a => a.name === 'kontakt-windows-x64-rc' && !a.expired);
-            if (artifacts.length !== 1) throw new Error('Published release artifact not found uniquely.');
-            const artifact = artifacts[0];
+            // upload-artifact v4 exposes the exact ID synchronously on success.
+            const artifactId = Number(process.env.KONTAKT_ARTIFACT_ID);
+            if (!Number.isSafeInteger(artifactId) || artifactId <= 0) {
+              throw new Error('upload-artifact did not provide a valid artifact ID.');
+            }
+            const artifact = { id: artifactId };
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: context.issue.number });
             if (pr.head.sha !== head) {
               core.warning('PR advanced during the workflow; do not publish stale artifact metadata.');
