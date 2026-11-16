@@ -26,6 +26,13 @@ class StableVersionTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn("v" + APP_VERSION, (ROOT / name).read_text(encoding="utf-8"))
 
+    def test_release_workflow_runs_when_main_version_is_published(self):
+        workflow = (ROOT / ".github/workflows/windows-release.yml").read_text(encoding="utf-8")
+        before_jobs = workflow.split("\njobs:", 1)[0]
+        self.assertIn('push:\n    branches: [main]\n    paths:\n      - "pyproject.toml"', before_jobs)
+        self.assertIn("  release:", workflow)
+        self.assertIn("gh release create", workflow)
+
     @unittest.skipUnless(HAS_QT, "PySide6 is not installed")
     def test_settings_show_real_release_version(self):
         from PySide6.QtWidgets import QApplication, QLabel

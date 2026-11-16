@@ -2,6 +2,11 @@ name: Windows onedir release candidate
 
 on:
   workflow_dispatch:
+  # A version bump on main builds, validates and publishes an immutable GitHub Release.
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
   pull_request:
     branches: [main]
     paths:
