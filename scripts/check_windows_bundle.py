@@ -114,6 +114,33 @@ def _test_normal_gui_startup(executable: Path, root: Path, environment: dict[str
     print("Normal Windows GUI startup: PASS, qwindows.dll, visible native window, WM_CLOSE.")
 
 
+
+def _test_rejected_qa_results(executable: Path, root: Path, environment: dict[str, str]) -> None:
+    """Frozen EXE must not overwrite any user-supplied file on QA failure."""
+    external = root / "DO-NOT-OVERWRITE.txt"
+    external.write_bytes(b"ORIGINAL EXTERNAL FILE")
+    profile = Path(environment["KONTAKT_SMOKE_ROOT"])
+    occupied = profile / ("qa-result-" + "f" * 32 + ".txt")
+    occupied.write_bytes(b"ORIGINAL QA REPORT")
+    for name, victim, token in (
+        ("bad-token-external", external, "0" * 64),
+        ("valid-token-external", external, environment["KONTAKT_SMOKE_TOKEN"]),
+        ("valid-token-occupied", occupied, environment["KONTAKT_SMOKE_TOKEN"]),
+    ):
+        original = victim.read_bytes()
+        env = dict(environment)
+        env["KONTAKT_SMOKE_TOKEN"] = token
+        env["KONTAKT_SMOKE_RESULT"] = str(victim)
+        result = subprocess.run(
+            [str(executable), "--release-smoke"],
+            env=env, cwd=executable.parent, timeout=30,
+            capture_output=True, text=True, errors="replace", check=False,
+        )
+        if result.returncode == 0 or victim.read_bytes() != original:
+            raise AssertionError(f"Frozen QA report isolation failed: {name}.")
+    print("Frozen EXE QA refusal: PASS, no existing/external report modified.")
+
+
 def check_bundle(dist: Path) -> None:
     if sys.platform != "win32":
         raise RuntimeError("Frozen executable integration test requires Windows.")
@@ -185,6 +212,7 @@ def check_bundle(dist: Path) -> None:
             image_hash = new_hash
             print(f"Frozen EXE verification: {expected}, real Qt + PDF + ZIP, isolated profile.")
 
+        _test_rejected_qa_results(target / "kontakt.exe", root, env)
         _test_normal_gui_startup(target / "kontakt.exe", root, env)
         print("Release probe complete. This does NOT certify a clean Windows 10/11 machine.")
 
