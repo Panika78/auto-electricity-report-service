@@ -15,6 +15,8 @@ on:
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: write
 
 jobs:
   build:
@@ -80,3 +82,52 @@ jobs:
             dist/build-requirements.txt
           if-no-files-found: error
           retention-days: 14
+      - name: Publish checked artifact reference to same-repo PR
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const manifest = JSON.parse(fs.readFileSync('dist/release-manifest.json', 'utf8'));
+            const { owner, repo } = context.repo;
+            const head = context.payload.pull_request.head.sha;
+            if (manifest.pr_head_commit !== head || manifest.build_checkout_commit !== context.sha) {
+              throw new Error('Manifest does not match this PR HEAD and actual workflow checkout.');
+            }
+            const { data: listing } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner, repo, run_id: context.runId, per_page: 100
+            });
+            const artifacts = listing.artifacts.filter(a => a.name === 'kontakt-windows-x64-rc' && !a.expired);
+            if (artifacts.length !== 1) throw new Error('Published release artifact not found uniquely.');
+            const artifact = artifacts[0];
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: context.issue.number });
+            if (pr.head.sha !== head) {
+              core.warning('PR advanced during the workflow; do not publish stale artifact metadata.');
+              return;
+            }
+            const start = '<!-- kontakt-release-candidate-start -->';
+            const end = '<!-- kontakt-release-candidate-end -->';
+            const current = pr.body || '';
+            const first = current.indexOf(start);
+            const last = current.indexOf(end);
+            if (first < 0 || last <= first) throw new Error('PR release metadata markers are missing.');
+            const url = 'https://github.com/' + owner + '/' + repo + '/actions/runs/' + context.runId;
+            const block = [
+              start,
+              '**HEAD PR:** ' + manifest.pr_head_commit + '.',
+              '**Checkout CI (merge commit):** ' + manifest.build_checkout_commit + '.',
+              '**Git tree:** ' + manifest.build_tree_sha + '.',
+              '- **Windows release:** [workflow run #' + context.runId + '](' + url + ') — Windows Server 2022 x64.',
+              '- **Артефакт:** kontakt-windows-x64-rc (ID ' + artifact.id + '), опубликован именно в этом workflow.',
+              '- **SHA-256 внутреннего kontakt-windows-x64.zip:** ' + manifest.zip_sha256 + '.',
+              '- **Проверки:** PyInstaller onedir, EXE fresh/existing, нативный GUI, PDF/ZIP, manifest/allowlist. Это НЕ приёмка Windows 10/11.',
+              end
+            ].join('\n');
+            const updated = current.slice(0, first) + block + current.slice(last + end.length);
+            await github.rest.pulls.update({ owner, repo, pull_number: context.issue.number, body: updated });
+            const { data: saved } = await github.rest.pulls.get({ owner, repo, pull_number: context.issue.number });
+            if (!saved.body.includes(url) || !saved.body.includes(String(artifact.id)) ||
+                !saved.body.includes(manifest.zip_sha256) || !saved.body.includes(manifest.pr_head_commit)) {
+              throw new Error('PR artifact reference post-publication verification failed.');
+            }
+            core.info('PR reference published: run ' + context.runId + ', artifact ' + artifact.id);
