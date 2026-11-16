@@ -12,6 +12,7 @@ import zipfile
 from pathlib import Path
 
 from app.app_icon import load_application_icon
+from app.version import APP_VERSION
 from app.core.service import CalculationService
 from app.data import database as db
 from app.documents import export_bulk_zip, export_document
@@ -34,6 +35,7 @@ def _probe() -> str:
 
     app = QApplication.instance() or QApplication([])
     app.setApplicationName("контакт")
+    app.setApplicationVersion(APP_VERSION)
     app.setWindowIcon(load_application_icon())
     if app.windowIcon().pixmap(32, 32).isNull():
         raise AssertionError("Иконка Qt не отображается в тестовом EXE.")

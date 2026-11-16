@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from app.data.database import Database
+from app.version import APP_VERSION
 
 
 def main(db_path: Path | str | None = None) -> int:
@@ -15,6 +16,7 @@ def main(db_path: Path | str | None = None) -> int:
 
     app = QApplication.instance() or QApplication([])
     app.setApplicationName("контакт")
+    app.setApplicationVersion(APP_VERSION)
     app.setWindowIcon(load_application_icon())
 
     try:

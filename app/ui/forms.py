@@ -18,6 +18,7 @@ from PySide6.QtGui import QPixmap
 from app.core.calculations import recalculate
 from app.core.validation import validate_calculation
 from app.core.service import CalculationService
+from app.version import APP_VERSION
 from app.data import database as db
 from app.data import queries
 from app.documents import ExportError, export_bulk_zip, export_document, safe_filename
@@ -1280,6 +1281,11 @@ class SettingsPage(QWidget):
         self.note.setObjectName("mutedLabel")
         self.note.setWordWrap(True)
         outer.addWidget(self.note)
+        self.version_label = QLabel(f"Контакт · версия {APP_VERSION}")
+        self.version_label.setObjectName("appVersion")
+        self.version_label.setAccessibleName("Версия приложения")
+        self.version_label.setStyleSheet("color:#657276; font-size:11px;")
+        outer.addWidget(self.version_label)
         self.reload()
         self._initial_load = False
 

@@ -133,3 +133,72 @@ jobs:
               throw new Error('PR artifact reference post-publication verification failed.');
             }
             core.info('PR reference published: run ' + context.runId + ', artifact ' + artifact.id);
+
+  release:
+    name: Publish versioned Windows release after successful main build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: kontakt-windows-x64-rc
+          path: dist
+      - name: Validate immutable release manifest against main
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_release_manifest.py \
+            --manifest dist/release-manifest.json \
+            --zip dist/kontakt-windows-x64.zip \
+            --build-checkout-commit "$GITHUB_SHA" \
+            --build-tree-sha "$(git rev-parse 'HEAD^{tree}')"
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          import json
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          from app.version import APP_VERSION
+          assert version == APP_VERSION, "Version mismatch between project metadata and GUI"
+          manifest = json.loads(Path("dist/release-manifest.json").read_text(encoding="utf-8-sig"))
+          assert manifest["pr_head_commit"] is None, "A main release must be built from main, not PR merge"
+          assert Path("CHANGELOG.md").read_text(encoding="utf-8").find("v" + version) >= 0
+          print("Verified release version:", version)
+          PY
+      - name: Create version tag, release and verified binary assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          tag="v${version}"
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid stable release version: $tag" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists; refusing to overwrite a release." >&2
+            exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "GitHub Release $tag already exists; refusing to overwrite." >&2
+            exit 1
+          fi
+          gh release create "$tag" \
+            dist/kontakt-windows-x64.zip \
+            dist/release-manifest.json \
+            dist/build-requirements.txt \
+            --target "$GITHUB_SHA" \
+            --title "Контакт $tag" \
+            --notes-file CHANGELOG.md \
+            --latest
+          gh release view "$tag" --json tagName,url --jq '.tagName + " " + .url'
