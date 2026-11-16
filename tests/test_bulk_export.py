@@ -475,7 +475,9 @@ class BulkZipTests(unittest.TestCase):
                      "CONIN$.zip", "CONOUT$.zip", "COM¹.txt.zip"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 export_bulk_zip(self.service, 2026, 10, self.root / name)
-            self.assertFalse((self.root / name).exists())
+            # Windows resolves reserved DOS device names as existing paths,
+            # even if no directory entry was created. Inspect actual entries.
+            self.assertNotIn(name, {item.name for item in self.root.iterdir()})
         self.assertEqual(self.docs(cid), {})
 
     def test_individual_pdf_superscript_reserved_name_rejected_before_reservation(self):
@@ -484,7 +486,9 @@ class BulkZipTests(unittest.TestCase):
         for name in ("COM¹.pdf", "COM².pdf", "LPT³.pdf", "CONIN$.pdf"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 export_document(self.service, cid, "act", self.root / name)
-            self.assertFalse((self.root / name).exists())
+            # Windows resolves reserved DOS device names as existing paths,
+            # even if no directory entry was created. Inspect actual entries.
+            self.assertNotIn(name, {item.name for item in self.root.iterdir()})
         self.assertEqual(self.docs(cid), {})
 
 

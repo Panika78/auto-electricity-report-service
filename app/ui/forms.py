@@ -18,6 +18,7 @@ from PySide6.QtGui import QPixmap
 from app.core.calculations import recalculate
 from app.core.validation import validate_calculation
 from app.core.service import CalculationService
+from app.version import APP_VERSION
 from app.data import database as db
 from app.data import queries
 from app.documents import ExportError, export_bulk_zip, export_document, safe_filename
@@ -1280,6 +1281,11 @@ class SettingsPage(QWidget):
         self.note.setObjectName("mutedLabel")
         self.note.setWordWrap(True)
         outer.addWidget(self.note)
+        self.version_label = QLabel(f"Контакт · версия {APP_VERSION}")
+        self.version_label.setObjectName("appVersion")
+        self.version_label.setAccessibleName("Версия приложения")
+        self.version_label.setStyleSheet("color:#657276; font-size:11px;")
+        outer.addWidget(self.version_label)
         self.reload()
         self._initial_load = False
 
@@ -1360,7 +1366,8 @@ class SettingsPage(QWidget):
         try:
             with self.service.database.connection() as conn:
                 previous = db.get_settings(conn)[key]
-            uploaded = import_image(path, "signature" if key == "signature_path" else "stamp")
+            uploaded = import_image(path, "signature" if key == "signature_path" else "stamp",
+                                    database=self.service.database)
             result = self.service.update_settings(**{key: str(uploaded)})
             if result is None:
                 raise RuntimeError("Изображение не сохранено.")
@@ -1371,7 +1378,7 @@ class SettingsPage(QWidget):
             return
         self.reload()
         try:
-            remove_managed_image(previous)
+            remove_managed_image(previous, database=self.service.database)
         except OSError as error:
             QMessageBox.warning(self, "Очистка старого изображения", str(error))
         self.note.setText("Изображение сохранено в локальной папке приложения.")
@@ -1391,7 +1398,7 @@ class SettingsPage(QWidget):
         if result is not CANCELLED:
             self.reload()
             try:
-                remove_managed_image(previous)
+                remove_managed_image(previous, database=self.service.database)
             except OSError as error:
                 QMessageBox.warning(self, "Очистка изображения",
                                     "Ссылка удалена, но файл остался: " + str(error))

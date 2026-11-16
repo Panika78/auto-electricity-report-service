@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "electricity-reports"
-version = "0.1.0"
+version = "1.0.0"
 description = "Локальное приложение для учета электроэнергии и подготовки документов"
 requires-python = ">=3.11"
 dependencies = ["PySide6>=6.8,<7", "reportlab>=4.2,<5"]
@@ -17,3 +17,4 @@ test = ["pypdf>=5,<7"]
 
 [tool.setuptools.package-data]
 "app.documents" = ["fonts/*.ttf", "fonts/OFL-*.txt"]
+"app" = ["assets/kontakt-icon.ico", "assets/kontakt-icon.svg"]

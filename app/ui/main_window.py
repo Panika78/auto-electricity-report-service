@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QGridLayout, QSizePolicy, QTabWidget,
 )
 
+from app.app_icon import load_application_icon
 from app.core.service import CalculationService
 from app.core.validation import validate_calculation
 from app.data import database as db
@@ -150,6 +151,7 @@ class MainWindow(QMainWindow):
         previous = QDate.currentDate().addMonths(-1)
         self.year, self.month = previous.year(), previous.month()
         self.setWindowTitle("контакт — учёт электроэнергии")
+        self.setWindowIcon(load_application_icon())
         self.resize(1360, 820)
         self.setMinimumSize(790, 540)
         self.setStyleSheet(THEME)
@@ -159,6 +161,11 @@ class MainWindow(QMainWindow):
         self._post_layout_fit_timer = QTimer(self)
         self._post_layout_fit_timer.setSingleShot(True)
         self._post_layout_fit_timer.timeout.connect(self._fit_calculation_columns)
+        # Unlike QTimer.singleShot(callable), this callback is cancelled when
+        # the window is destroyed; a delayed fit must never access a dead table.
+        self._immediate_fit_timer = QTimer(self)
+        self._immediate_fit_timer.setSingleShot(True)
+        self._immediate_fit_timer.timeout.connect(self._run_scheduled_calculation_fit)
         self._build()
         apply_appearance()
         self._refresh_all()
@@ -526,7 +533,7 @@ class MainWindow(QMainWindow):
                 or getattr(self, "_calc_fit_scheduled", False)):
             return
         self._calc_fit_scheduled = True
-        QTimer.singleShot(0, self._run_scheduled_calculation_fit)
+        self._immediate_fit_timer.start(0)
         # A second, debounced fit uses the final scroll-area viewport width,
         # which can change after the first Qt event processing pass on Windows.
         self._post_layout_fit_timer.start(45)

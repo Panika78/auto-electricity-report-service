@@ -9,10 +9,13 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QSettings, QStandardPaths
+from PySide6.QtCore import QSettings
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
+from app.data import database as db
+from app.data.database import get_database_path
+from app.qa_profile import validate_qa_profile
 from app.core.calculations import decimal_value
 from app.core.service import ConfirmationRequired
 from app.documents import ExportError
@@ -118,6 +121,14 @@ def show_number(value: Any) -> str:
 
 
 def appearance_settings() -> QSettings:
+    # Windows NativeFormat normally uses HKCU. During release QA, use a
+    # dedicated INI under the explicitly isolated synthetic profile instead.
+    # Ordinary users keep the existing native Qt settings without migration.
+    if os.environ.get("KONTAKT_RELEASE_SMOKE") == "1":
+        root = validate_qa_profile()
+        settings = QSettings(str(root / "qa-appearance.ini"), QSettings.Format.IniFormat)
+        settings.setFallbacksEnabled(False)
+        return settings
     return QSettings("Kontakt", "Kontakt")
 
 
@@ -202,16 +213,19 @@ def apply_appearance() -> None:
 
 
 
-def image_directory() -> Path:
-    root = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
-    if not root:
-        raise OSError("Не удалось определить каталог данных приложения.")
-    path = Path(root) / "images"
+def image_directory(database: db.Database | None = None) -> Path:
+    """Keep images beside the SQLite database used by this UI/service.
+
+    Existing absolute image references remain readable; do not migrate/delete
+    files on an upgrade. Passing the explicit Database isolates test profiles.
+    """
+    db_path = database.path if database is not None else get_database_path()
+    path = db_path.parent / "images"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def import_image(source: str, kind: str) -> Path:
+def import_image(source: str, kind: str, *, database: db.Database | None = None) -> Path:
     """Copy image into app data, without exposing an external removable path."""
     if kind not in ("signature", "stamp"):
         raise ValueError("Недопустимый тип изображения.")
@@ -222,7 +236,7 @@ def import_image(source: str, kind: str) -> Path:
     reader = QImageReader(str(path))
     if not reader.canRead() or reader.read().isNull():
         raise ValueError("Изображение повреждено или не поддерживается.")
-    directory = image_directory()
+    directory = image_directory(database)
     fd, tmp = tempfile.mkstemp(prefix=".upload-", dir=directory)
     os.close(fd)
     try:
@@ -237,14 +251,14 @@ def import_image(source: str, kind: str) -> Path:
             os.unlink(tmp)
 
 
-def remove_managed_image(path: str | None) -> None:
+def remove_managed_image(path: str | None, *, database: db.Database | None = None) -> None:
     """Remove only image copies located in our own application directory."""
     if not path:
         return
     target = Path(path)
     if target.is_symlink():
         raise OSError("Ссылка на файл не удалена из соображений безопасности.")
-    base = image_directory().resolve()
+    base = image_directory(database).resolve()
     if target.resolve().parent != base:
         return  # old externally referenced file belongs to the user
     if target.name.startswith(("signature-", "stamp-")):

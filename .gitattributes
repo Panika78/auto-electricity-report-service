@@ -1,0 +1,3 @@
+# Preserve the exact bytes of user-supplied Windows icon and vector master.
+app/assets/kontakt-icon.ico binary
+app/assets/kontakt-icon.svg -text

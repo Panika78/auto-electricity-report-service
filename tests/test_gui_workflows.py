@@ -334,20 +334,51 @@ class NativeWorkflowTests(unittest.TestCase):
         image = QImage(6, 6, QImage.Format.Format_RGB32)
         image.fill(0xFFFFFFFF)
         self.assertTrue(image.save(str(source)))
+        # This test intentionally uses a custom database path; imported
+        # images must follow it, without patching the global user profile.
         page = SettingsPage(self.service)
-        with mock.patch.object(QFileDialog, "getOpenFileName",
-                               return_value=(str(source), "Изображения (*.png *.jpg *.jpeg)")):
-            page._select_image("signature_path")
-        with self.database.connection() as conn:
-            path = db.get_settings(conn)["signature_path"]
-        self.assertTrue(path)
-        self.assertTrue(Path(path).is_file())
-        self.assertNotEqual(Path(path).resolve(), source.resolve())
-        with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
-            page._remove_image("signature_path")
-        with self.database.connection() as conn:
-            self.assertIsNone(db.get_settings(conn)["signature_path"])
-        self.assertFalse(Path(path).exists())
+        with mock.patch("app.ui.common.get_database_path",
+                        side_effect=AssertionError("Unexpected default profile access")):
+            with mock.patch.object(QFileDialog, "getOpenFileName",
+                                   return_value=(str(source), "Изображения (*.png *.jpg *.jpeg)")):
+                page._select_image("signature_path")
+            with self.database.connection() as conn:
+                path = db.get_settings(conn)["signature_path"]
+            self.assertTrue(path)
+            self.assertEqual(Path(path).parent, self.database.path.parent / "images")
+            self.assertTrue(Path(path).is_file())
+            self.assertNotEqual(Path(path).resolve(), source.resolve())
+            with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+                page._remove_image("signature_path")
+            with self.database.connection() as conn:
+                self.assertIsNone(db.get_settings(conn)["signature_path"])
+            self.assertFalse(Path(path).exists())
+
+    def test_two_custom_databases_keep_managed_images_separate(self):
+        from PySide6.QtGui import QImage
+        from app.ui.common import import_image, remove_managed_image
+        from app.data.database import Database
+
+        image_file = Path(self.dir.name) / "synthetic-separate.png"
+        image = QImage(6, 6, QImage.Format.Format_RGB32)
+        image.fill(0xFFFFFFFF)
+        self.assertTrue(image.save(str(image_file)))
+        other_db = Database(Path(self.dir.name) / "second" / "app.db")
+        other_db.initialize()
+        with mock.patch("app.ui.common.get_database_path",
+                        side_effect=AssertionError("Real profile must not be used")):
+            a = import_image(str(image_file), "signature", database=self.database)
+            b = import_image(str(image_file), "stamp", database=other_db)
+            self.assertNotEqual(a.parent, b.parent)
+            self.assertEqual(a.parent, self.database.path.parent / "images")
+            self.assertEqual(b.parent, other_db.path.parent / "images")
+            remove_managed_image(str(a), database=other_db)
+            self.assertTrue(a.exists())  # foreign database cannot delete it
+            self.assertTrue(b.exists())
+            remove_managed_image(str(a), database=self.database)
+            remove_managed_image(str(b), database=other_db)
+            self.assertFalse(a.exists())
+            self.assertFalse(b.exists())
 
     def test_editing_one_field_preserves_other_unsaved_input(self):
         from PySide6.QtWidgets import QMessageBox
