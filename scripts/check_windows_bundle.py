@@ -11,6 +11,7 @@ import time
 from contextlib import closing
 import hashlib
 import os
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -130,7 +131,6 @@ def check_bundle(dist: Path) -> None:
         roaming.mkdir(parents=True)
         token = create_qa_profile(profile)
         expected_database = profile / "ElectricityReports" / "app.db"
-        marker = root / "probe.txt"
         image_hash = None
 
         env = dict(os.environ)
@@ -139,7 +139,6 @@ def check_bundle(dist: Path) -> None:
             "APPDATA": str(roaming),
             "KONTAKT_SMOKE_ROOT": str(profile),
             "KONTAKT_SMOKE_TOKEN": token,
-            "KONTAKT_SMOKE_RESULT": str(marker),
             "KONTAKT_RELEASE_SMOKE": "1",
             "QT_QPA_PLATFORM": "offscreen",
             "QT_OPENGL": "software",
@@ -150,11 +149,12 @@ def check_bundle(dist: Path) -> None:
         env["PATH"] = str(windows / "System32") + os.pathsep + str(windows)
 
         for index, expected in enumerate(("PASS fresh", "PASS existing")):
+            marker = profile / f"qa-result-{secrets.token_hex(16)}.txt"
+            env["KONTAKT_SMOKE_RESULT"] = str(marker)
             if target.exists():
                 # Simulate replacing the program directory, NEVER the profile.
                 shutil.rmtree(target)
             shutil.copytree(dist, target)
-            marker.unlink(missing_ok=True)
             result = subprocess.run(
                 [str(target / "kontakt.exe"), "--release-smoke"],
                 env=env, cwd=target.parent, timeout=120,
