@@ -155,10 +155,10 @@ def run_release_smoke() -> int:
     try:
         phase = _probe()
     except Exception:
-        report = "FAIL\\n" + traceback.format_exc()
+        report = "FAIL\n" + traceback.format_exc()
         exit_code = 1
     else:
-        report = "PASS " + phase + "\\n"
+        report = "PASS " + phase + "\n"
         exit_code = 0
 
     try:
