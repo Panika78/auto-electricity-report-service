@@ -14,7 +14,7 @@ from pathlib import Path
 from app.core.service import CalculationService
 from app.data import database as db
 from app.documents import export_bulk_zip, export_document
-from app.qa_profile import validate_qa_profile
+from app.qa_profile import validate_qa_profile, validate_qa_result_path
 
 
 def _probe() -> str:
@@ -145,9 +145,26 @@ def run_release_smoke() -> int:
     if not result_path:
         return 2
     try:
+        # Do this BEFORE _probe() and before either success/error report.
+        root = validate_qa_profile()
+        safe_path = validate_qa_result_path(result_path, root)
+    except Exception:
+        # A missing/invalid marker must NEVER redirect diagnostics elsewhere.
+        return 2
+
+    try:
         phase = _probe()
     except Exception:
-        Path(result_path).write_text("FAIL\n" + traceback.format_exc(), encoding="utf-8")
+        report = "FAIL\\n" + traceback.format_exc()
+        exit_code = 1
+    else:
+        report = "PASS " + phase + "\\n"
+        exit_code = 0
+
+    try:
+        # Exclusive creation: never truncate an existing file, even under races.
+        with safe_path.open("x", encoding="utf-8") as output:
+            output.write(report)
+    except OSError:
         return 1
-    Path(result_path).write_text("PASS " + phase + "\n", encoding="utf-8")
-    return 0
+    return exit_code
