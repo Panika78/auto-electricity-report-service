@@ -52,15 +52,18 @@ class ReleaseSmokeTests(unittest.TestCase):
     def test_matching_paths_without_marker_fail_before_opening_sqlite(self):
         with tempfile.TemporaryDirectory(prefix="kontakt-no-marker-") as directory:
             root = Path(directory).resolve()
-            report = root / "result.txt"
+            local = root / "qa"
+            local.mkdir()
+            victim = root / "victim.txt"
+            victim.write_bytes(b"ORIGINAL")
             env = os.environ.copy()
             env.update({
                 "KONTAKT_RELEASE_SMOKE": "1",
-                "KONTAKT_SMOKE_ROOT": str(root),
+                "KONTAKT_SMOKE_ROOT": str(local),
                 "KONTAKT_SMOKE_TOKEN": "0" * 64,
-                "KONTAKT_SMOKE_RESULT": str(report),
-                "LOCALAPPDATA": str(root),
-                "XDG_DATA_HOME": str(root),
+                "KONTAKT_SMOKE_RESULT": str(victim),
+                "LOCALAPPDATA": str(local),
+                "XDG_DATA_HOME": str(local),
                 "QT_QPA_PLATFORM": "offscreen",
             })
             result = subprocess.run(
@@ -69,8 +72,62 @@ class ReleaseSmokeTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=30,
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("маркер", report.read_text(encoding="utf-8").lower())
-            self.assertFalse((root / "ElectricityReports" / "app.db").exists())
+            self.assertEqual(victim.read_bytes(), b"ORIGINAL")
+            self.assertFalse((local / "ElectricityReports" / "app.db").exists())
+
+    def test_existing_report_is_never_truncated_with_valid_profile(self):
+        from app.qa_profile import create_qa_profile
+        with tempfile.TemporaryDirectory(prefix="kontakt-existing-report-") as directory:
+            local = Path(directory).resolve()
+            token = create_qa_profile(local)
+            victim = local / ("qa-result-" + "f" * 32 + ".txt")
+            victim.write_bytes(b"ORIGINAL REPORT")
+            env = os.environ.copy()
+            env.update({
+                "KONTAKT_RELEASE_SMOKE": "1",
+                "KONTAKT_SMOKE_ROOT": str(local),
+                "KONTAKT_SMOKE_TOKEN": token,
+                "KONTAKT_SMOKE_RESULT": str(victim),
+                "LOCALAPPDATA": str(local),
+                "XDG_DATA_HOME": str(local),
+                "QT_QPA_PLATFORM": "offscreen",
+            })
+            completed = subprocess.run(
+                [sys.executable, "-m", "app.main", "--release-smoke"],
+                env=env, cwd=Path(__file__).resolve().parents[1],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(victim.read_bytes(), b"ORIGINAL REPORT")
+            self.assertFalse((local / "ElectricityReports" / "app.db").exists())
+
+    def test_valid_profile_does_not_authorize_external_report(self):
+        from app.qa_profile import create_qa_profile
+        with tempfile.TemporaryDirectory(prefix="kontakt-external-report-") as directory:
+            root = Path(directory).resolve()
+            local = root / "profile"
+            local.mkdir()
+            token = create_qa_profile(local)
+            victim = root / ("qa-result-" + "a" * 32 + ".txt")
+            victim.write_bytes(b"EXTERNAL")
+            env = os.environ.copy()
+            env.update({
+                "KONTAKT_RELEASE_SMOKE": "1",
+                "KONTAKT_SMOKE_ROOT": str(local),
+                "KONTAKT_SMOKE_TOKEN": token,
+                "KONTAKT_SMOKE_RESULT": str(victim),
+                "LOCALAPPDATA": str(local),
+                "XDG_DATA_HOME": str(local),
+                "QT_QPA_PLATFORM": "offscreen",
+            })
+            completed = subprocess.run(
+                [sys.executable, "-m", "app.main", "--release-smoke"],
+                env=env, cwd=Path(__file__).resolve().parents[1],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(victim.read_bytes(), b"EXTERNAL")
+            self.assertFalse((local / "ElectricityReports" / "app.db").exists())
 
     def test_rejects_actual_system_profile_even_with_valid_marker(self):
         from app.qa_profile import create_qa_profile, validate_qa_profile
@@ -98,18 +155,18 @@ class ReleaseSmokeTests(unittest.TestCase):
             local.mkdir()
             from app.qa_profile import create_qa_profile
             token = create_qa_profile(local)
-            marker = root / "result.txt"
             env = os.environ.copy()
             env.update({
                 "KONTAKT_RELEASE_SMOKE": "1",
                 "KONTAKT_SMOKE_ROOT": str(local),
                 "KONTAKT_SMOKE_TOKEN": token,
-                "KONTAKT_SMOKE_RESULT": str(marker),
                 "LOCALAPPDATA": str(local),
                 "XDG_DATA_HOME": str(local),
                 "QT_QPA_PLATFORM": "offscreen",
             })
-            for expected in ("PASS fresh", "PASS existing"):
+            for index, expected in enumerate(("PASS fresh", "PASS existing"), start=1):
+                marker = local / ("qa-result-" + str(index) * 32 + ".txt")
+                env["KONTAKT_SMOKE_RESULT"] = str(marker)
                 completed = subprocess.run(
                     [sys.executable, "-m", "app.main", "--release-smoke"],
                     env=env, cwd=Path(__file__).resolve().parents[1],
@@ -118,6 +175,8 @@ class ReleaseSmokeTests(unittest.TestCase):
                 report = marker.read_text(encoding="utf-8") if marker.exists() else ""
                 self.assertEqual(completed.returncode, 0, report + completed.stderr)
                 self.assertTrue(report.startswith(expected), report)
+            first = local / ("qa-result-" + "1" * 32 + ".txt")
+            self.assertEqual(first.read_text(encoding="utf-8"), "PASS fresh\n")
             self.assertTrue((local / "ElectricityReports" / "app.db").is_file())
             self.assertTrue((local / "qa-appearance.ini").is_file())
 
