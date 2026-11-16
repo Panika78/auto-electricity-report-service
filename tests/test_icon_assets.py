@@ -24,6 +24,11 @@ class UploadedIconAssetTests(unittest.TestCase):
                 content = (ASSETS / name).read_bytes()
                 self.assertEqual(hashlib.sha256(content).hexdigest(), expected_sha256)
 
+    def test_git_preserves_original_icon_bytes_on_windows(self):
+        attributes = (ASSETS.parents[1] / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("app/assets/kontakt-icon.ico binary", attributes)
+        self.assertIn("app/assets/kontakt-icon.svg -text", attributes)
+
     def test_ico_contains_seven_original_windows_resolutions(self):
         content = (ASSETS / "kontakt-icon.ico").read_bytes()
         self.assertEqual(content[:4], b"\x00\x00\x01\x00")
