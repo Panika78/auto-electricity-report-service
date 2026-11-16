@@ -88,6 +88,18 @@ try {
         throw "В дистрибутиве обнаружены подозрительные пользовательские файлы: $($leaks.FullName -join ', ')"
     }
 
+    # Both packaged icons must match the exact files uploaded by the owner.
+    foreach ($file in @("kontakt-icon.ico", "kontakt-icon.svg")) {
+        $original = Join-Path $root ("app\assets\" + $file)
+        $bundled = Join-Path $bundle ("_internal\app\assets\" + $file)
+        if (-not (Test-Path -LiteralPath $bundled -PathType Leaf)) {
+            throw "Отсутствует оригинальная иконка в дистрибутиве: $file"
+        }
+        if ((Get-FileHash -LiteralPath $original -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $bundled -Algorithm SHA256).Hash) {
+            throw "Иконка отличается от переданного файла: $file"
+        }
+    }
     & $pythonExe scripts/validate_windows_bundle.py --dist $bundle
     if ($LASTEXITCODE -ne 0) { throw "В onedir есть недопустимые файлы или отсутствуют ресурсы." }
     & $pythonExe scripts/check_windows_bundle.py --dist $bundle

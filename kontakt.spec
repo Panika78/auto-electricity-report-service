@@ -8,6 +8,9 @@ if sys.platform != "win32":
 
 root = Path(SPECPATH).resolve()
 font_dir = root / "app" / "documents" / "fonts"
+icon_dir = root / "app" / "assets"
+icon_file = icon_dir / "kontakt-icon.ico"
+icon_svg = icon_dir / "kontakt-icon.svg"
 font_names = (
     "PT_Sans-Web-Regular.ttf",
     "PT_Sans-Web-Bold.ttf",
@@ -19,12 +22,15 @@ font_names = (
 missing = [name for name in font_names if not (font_dir / name).is_file()]
 if missing:
     raise RuntimeError("Не найдены шрифты или их лицензии: " + ", ".join(missing))
+if not icon_file.is_file() or not icon_svg.is_file():
+    raise RuntimeError("Отсутствует оригинальная иконка контакт (.ico/.svg).")
 
 a = Analysis(
     [str(root / "app" / "main.py")],
     pathex=[str(root)],
     binaries=[],
-    datas=[(str(font_dir / name), "app/documents/fonts") for name in font_names],
+    datas=[(str(font_dir / name), "app/documents/fonts") for name in font_names]
+          + [(str(path), "app/assets") for path in (icon_file, icon_svg)],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -39,6 +45,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="kontakt",
+    icon=str(icon_file),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

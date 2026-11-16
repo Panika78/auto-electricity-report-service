@@ -10,10 +10,12 @@ from app.data.database import Database
 def main(db_path: Path | str | None = None) -> int:
     # Импорт GUI при запуске, чтобы слой данных можно было тестировать без Qt.
     from PySide6.QtWidgets import QApplication, QMessageBox
+    from app.app_icon import load_application_icon
     from app.ui.main_window import MainWindow
 
     app = QApplication.instance() or QApplication([])
     app.setApplicationName("контакт")
+    app.setWindowIcon(load_application_icon())
 
     try:
         database = Database(db_path)

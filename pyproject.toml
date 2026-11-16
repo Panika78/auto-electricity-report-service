@@ -17,3 +17,4 @@ test = ["pypdf>=5,<7"]
 
 [tool.setuptools.package-data]
 "app.documents" = ["fonts/*.ttf", "fonts/OFL-*.txt"]
+"app" = ["assets/kontakt-icon.ico", "assets/kontakt-icon.svg"]

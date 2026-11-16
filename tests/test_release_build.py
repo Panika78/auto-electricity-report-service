@@ -8,7 +8,7 @@ from pathlib import Path
 
 from scripts.check_release_manifest import validate_manifest
 from scripts.validate_windows_bundle import (
-    PDF_RESOURCES, UnsafeBundleError, validate_directory, validate_zip,
+    ICON_RESOURCES, PDF_RESOURCES, UnsafeBundleError, validate_directory, validate_zip,
 )
 
 
@@ -18,7 +18,9 @@ def create_fake_distribution(root: Path) -> Path:
         "kontakt.exe", "_internal/base_library.zip", "_internal/python311.dll",
         "_internal/PySide6/Qt/plugins/platforms/qwindows.dll",
         "_internal/PySide6/Qt/plugins/platforms/qoffscreen.dll",
-    } | {f"_internal/app/documents/fonts/{name}" for name in PDF_RESOURCES}
+    } | {f"_internal/app/documents/fonts/{name}" for name in PDF_RESOURCES} | {
+        f"_internal/app/assets/{name}" for name in ICON_RESOURCES
+    }
     for name in names:
         file = bundle / name
         file.parent.mkdir(parents=True, exist_ok=True)
@@ -37,6 +39,8 @@ class WindowsReleaseStructureTests(unittest.TestCase):
         names = validate_directory(self.dist)
         self.assertIn("_internal/base_library.zip", names)
         self.assertIn("_internal/app/documents/fonts/OFL-PTSans.txt", names)
+        self.assertIn("_internal/app/assets/kontakt-icon.ico", names)
+        self.assertIn("_internal/app/assets/kontakt-icon.svg", names)
 
     def test_personal_files_blocked_even_with_innocent_extension_or_filename(self):
         for name in ("clients.csv", "bank-details.txt", "private-scan.png",
@@ -54,6 +58,17 @@ class WindowsReleaseStructureTests(unittest.TestCase):
         path = self.dist / "developer-notes.md"
         path.write_text("private", encoding="utf-8")
         with self.assertRaises(UnsafeBundleError):
+            validate_directory(self.dist)
+
+    def test_unknown_app_asset_rejected(self):
+        path = self.dist / "_internal/app/assets/unapproved.png"
+        path.write_bytes(b"not an app icon")
+        with self.assertRaises(UnsafeBundleError):
+            validate_directory(self.dist)
+
+    def test_missing_uploaded_icon_rejected(self):
+        (self.dist / "_internal/app/assets/kontakt-icon.ico").unlink()
+        with self.assertRaisesRegex(UnsafeBundleError, "иконка"):
             validate_directory(self.dist)
 
     def test_unknown_pdf_font_rejected(self):

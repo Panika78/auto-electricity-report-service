@@ -10,6 +10,7 @@ import argparse
 import zipfile
 from pathlib import Path, PurePosixPath
 
+ICON_RESOURCES = {"kontakt-icon.ico", "kontakt-icon.svg"}
 PDF_RESOURCES = {
     "PT_Sans-Web-Regular.ttf",
     "PT_Sans-Web-Bold.ttf",
@@ -47,6 +48,8 @@ def _allowed(relative: PurePosixPath) -> bool:
         return True
     if inside[:3] == ("app", "documents", "fonts"):
         return len(inside) == 4 and inside[3] in PDF_RESOURCES
+    if inside[:2] == ("app", "assets"):
+        return len(inside) == 3 and inside[2] in ICON_RESOURCES
     if relative.suffix.lower() in BINARY_SUFFIXES:
         # PyInstaller's analyzed Python/Qt DLLs and extension modules.
         return True
@@ -76,6 +79,9 @@ def validate_entries(names: set[str]) -> None:
     for font in PDF_RESOURCES:
         if f"_internal/app/documents/fonts/{font}" not in names:
             raise UnsafeBundleError(f"Отсутствует обязательный ресурс PDF: {font}.")
+    for name in ICON_RESOURCES:
+        if f"_internal/app/assets/{name}" not in names:
+            raise UnsafeBundleError(f"Отсутствует обязательная иконка приложения: {name}.")
     for name in REQUIRED_DLLS:
         if not any(PurePosixPath(item).name.lower() == name.lower() for item in names):
             raise UnsafeBundleError(f"Отсутствует Python runtime: {name}")
