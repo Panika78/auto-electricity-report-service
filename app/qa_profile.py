@@ -91,7 +91,7 @@ def validate_qa_result_path(selected: str, root: Path) -> Path:
     path = Path(selected).expanduser()
     if not path.is_absolute():
         raise RuntimeError("Путь результата QA должен быть абсолютным.")
-    if not re.fullmatch(r"qa-result-[a-f0-9]{32}\\.txt", path.name):
+    if not re.fullmatch(r"qa-result-[a-f0-9]{32}\.txt", path.name):
         raise RuntimeError("Недопустимое имя файла результата QA.")
     if not _same(path.parent, root) or not _same(path, root / path.name):
         raise RuntimeError("Файл результата QA должен находиться внутри тестового профиля.")
